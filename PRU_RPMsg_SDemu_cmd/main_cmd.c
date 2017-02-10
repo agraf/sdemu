@@ -455,7 +455,8 @@ int is_initialized = 0;
 struct pru_rpmsg_transport transport;
 uint16_t src, dst;
 
-extern void send_buf_1bit_cmd(register uint8_t *buf, register uint32_t len);
+extern void send_buf_1bit_dat(register uint8_t *buf, register uint32_t len);
+extern void read_buf_cmd(uint8_t *buf, uint32_t len);
 
 static char *alloc_buf(int len)
 {
@@ -761,7 +762,7 @@ static void send_48reply(register uint8_t cmd, register uint32_t args)
 			crc7,
 	};
 
-	send_buf_1bit_cmd(buf, sizeof(buf));
+	send_buf_1bit_dat(buf, sizeof(buf));
 }
 
 static void reply_r1(register uint8_t cmd)
@@ -783,7 +784,7 @@ static void reply_r2(uint8_t *reg)
 	};
 
 	switch_to_send();
-	send_buf_1bit_cmd(buf, sizeof(buf));
+	send_buf_1bit_dat(buf, sizeof(buf));
 	switch_to_recv();
 }
 
@@ -796,7 +797,7 @@ static void reply_r3()
 	};
 
 	switch_to_send();
-	send_buf_1bit_cmd(buf, sizeof(buf));
+	send_buf_1bit_dat(buf, sizeof(buf));
 	switch_to_recv();
 }
 
@@ -995,11 +996,47 @@ static void cmd_select_card(register int curcmd, register int args)
 	/* Unbusy ourselves */
 	__R30 |= DAT0_MASK;
 	switch_to_recv();
+#elif defined(BE_CORRECT)
+	switch (get_state()) {
+    case sd_standby_state:
+        if (args != rca)
+            goto no_reply;
+
+        set_state(sd_transfer_state);
+        break;
+    case sd_transfer_state:
+    case sd_sendingdata_state:
+        if (args == rca) {
+        	set_state(sd_idle_state);
+        	card_status |= ILLEGAL_COMMAND;
+        }
+
+        set_state(sd_standby_state);
+        break;
+    case sd_disconnect_state:
+        if (args != rca)
+            goto no_reply;
+
+        set_state(sd_programming_state);
+        break;
+    case sd_programming_state:
+        if (args == rca) {
+        	set_state(sd_idle_state);
+        	card_status |= ILLEGAL_COMMAND;
+        }
+
+        set_state(sd_disconnect_state);
+        break;
+	}
+
+	reply_r1(curcmd);
 #else
-	reply_r1(curcmd); // XXX only if matching
+	reply_r1(curcmd);
 	set_state(sd_transfer_state);
 #endif
 	card_status &= ~CARD_STATUS_B;
+
+no_reply:
 }
 
 static void cmd_send_if_cond(register int curcmd, register int args)
@@ -1194,25 +1231,26 @@ static void (*const cmd_table[0x40])(register int curcmd, register int args) = {
 		[63]						= cmd_invalid,				/* CMD63 */
 };
 
+struct sd_cmd {
+	uint8_t cmd;
+	uint32_t args;
+	uint8_t crc7;
+};
+
 static void read_cmd(void)
 {
-	register char curcmd;
-	register int args;
+	struct sd_cmd cmd;
 
-	/* Wait for CMD to go down and CLK to go up -> start bit */
-	while ((__R31 & (CMD_MASK | CLK_MASK)) != CLK_MASK) ;
-
-	curcmd = read_cmd_bits(0x80);
-	args = read_cmd_bits(0x80000000);
-	read_cmd_bits(0x80); /* crc7 */
+	/* Read command */
+	read_buf_cmd(&cmd, sizeof(cmd));
 
 	/* Only interpret host commands */
-	if ((curcmd & 0xc0) != 0x40) {
-		print_int("[ illegal in] CMD: ", curcmd);
+	if ((cmd.cmd & 0xc0) != 0x40) {
+		print_int("[ illegal in] CMD: ", cmd.cmd);
 		return;
 	}
 
 //	print_int("[ in] CMD: ", curcmd);
 
-	cmd_table[curcmd & 0x3f](curcmd, args);
+	cmd_table[cmd.cmd & 0x3f](cmd.cmd, cmd.args);
 }
