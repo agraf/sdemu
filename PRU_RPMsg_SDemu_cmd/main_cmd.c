@@ -535,7 +535,7 @@ static void switch_to_recv(void)
 		/* Wait for msg to comlete */
 		while (fast_cmd != SDEMU_MSG_DONE) ;
 	} else {
-		__R30 &= ~CMD_OUT_OFF_MASK;
+		__R30 |= CMD_OUT_OFF_MASK;
 	}
 
 	in_send_mode = RECV_MODE;
@@ -557,7 +557,7 @@ static void switch_to_send(void)
 		/* Wait for msg to comlete */
 		while (fast_cmd != SDEMU_MSG_DONE) ;
 	} else {
-		__R30 |= CMD_OUT_OFF_MASK;
+		__R30 &= ~CMD_OUT_OFF_MASK;
 	}
 
 	in_send_mode = SEND_MODE;
@@ -578,7 +578,7 @@ static void switch_to_data_recv(void)
 		/* Wait for msg to comlete */
 		while (fast_cmd != SDEMU_MSG_DONE) ;
 	} else {
-		__R30 &= ~DAT_OUT_OFF_MASK;
+		__R30 |= DAT_OUT_OFF_MASK;
 	}
 
 	data_in_send_mode = RECV_MODE;
@@ -597,7 +597,7 @@ static void switch_to_data_send(void)
 		/* Wait for msg to comlete */
 		while (fast_cmd != SDEMU_MSG_DONE) ;
 	} else {
-		__R30 |= DAT_OUT_OFF_MASK;
+		__R30 &= ~DAT_OUT_OFF_MASK;
 	}
 
 	data_in_send_mode = SEND_MODE;
@@ -609,6 +609,7 @@ static void enable_pins(void)
 	CT_CFG.GPCFG0 = 0x0000;
 
 	switch_to_recv();
+	switch_to_data_send();
 }
 
 static void calc_reg_crc7(uint8_t *reg)
@@ -701,6 +702,30 @@ static void query_sd_size(void)
 	calc_reg_crc7((uint8_t *)&csd);
 }
 
+static void detect_hwversion(void)
+{
+	/* V1.1 allows us to set and read CMD at the same time,
+	 * use that to detect which version we're running on */
+	uint32_t v1, v2;
+
+	__R30 = 0; /* Set CMD=0, enable CMD write */
+	__delay_cycles(2);
+	v1 = __R31;
+	__R30 = CMD_OUT_MASK;
+	__delay_cycles(8);
+	v2 = __R31;
+
+	if (!(v1 & CMD_MASK) && (v2 & CMD_MASK)) {
+		/* CMD populates from CMD_OUT to CMD, we're on 1.1 */
+		hwversion = SDEMU_V1_1;
+	}
+
+	/* enable_pins() enables DAT via buffer, disables CMD via buffer */
+	__R31 = CMD_OUT_OFF_MASK;
+
+	print_int("SDemu version: ", hwversion);
+}
+
 /*
  * main.c
  */
@@ -745,6 +770,9 @@ void main(void)
 
 					/* Make sure we know how big the SD card is */
 					query_sd_size();
+
+					/* Determine SDemu HW version */
+					detect_hwversion();
 
 					/* Before interpreting commands, wait for the reset sequence */
 					int i;
