@@ -19,6 +19,37 @@ wait_for_clk_high .macro
 		wbs r31, 0
 	.endm
 
+; Send one bit in the CMD stream when CLK goes down
+send_bit_n .macro BIT_NR
+		.newblock
+		QBBC $1, R14, BIT_NR
+	; Bit is set
+		wait_for_clk_low
+		ldi r30.b0, (1<<1) | (1<<7) ; Set CMD for v1.0 and v1.1
+		jmp $2
+$1: ; Bit is clear
+		wait_for_clk_low
+		ldi r30.b0, 0x0
+		jmp $2
+$2:
+		wait_for_clk_high
+	.endm
+
+; Send one bit in the CMD stream when CLK goes up
+send_bit_rev_n .macro BIT_NR
+		.newblock
+		QBBC $1, R14, BIT_NR
+	; Bit is set
+		wait_for_clk_high
+		ldi r30.b0, (1<<1) | (1<<7) ; Set CMD for v1.0 and v1.1
+		jmp $2
+$1: ; Bit is clear
+		wait_for_clk_high
+		ldi r30.b0, 0x0
+		jmp $2
+$2:
+		wait_for_clk_low
+	.endm
 	.global send_buf_cmd
 send_buf_cmd:
 
@@ -57,52 +88,36 @@ send_next_byte:
 	; current_byte = next_byte
 	mov	r14, r1
 
-	; Bit 0 - use gap to inc ptr
-	wait_for_clk_low
-	LSR R30.b0, R14, 6
-	wait_for_clk_high
+	; Bit 7 - use gap to inc ptr
+	send_bit_n 7
 	ADD R0, R0, 1
 
-	; Bit 1 - use gap to load next byte
-	wait_for_clk_low
-	LSR R30.b0, R14, 5
-	wait_for_clk_high
+	; Bit 6 - use gap to load next byte
+	send_bit_n 6
 	LBBO &R1.b0, R0, 0, 1
 
-	; Bit 2 - use gap to dec len
-	wait_for_clk_low
-	LSR R30.b0, R14, 4
-	wait_for_clk_high
+	; Bit 5 - use gap to dec len
+	send_bit_n 5
 	SUB R15, R15, 1
 
-	; Bit 3 - nop in gap
-	wait_for_clk_low
-	LSR R30.b0, R14, 3
-	wait_for_clk_high
-	nop ; delay to ensure we don't get stale clock values
-
 	; Bit 4 - nop in gap
-	wait_for_clk_low
-	LSR R30.b0, R14, 2
-	wait_for_clk_high
+	send_bit_n 4
 	nop ; delay to ensure we don't get stale clock values
 
-	; Bit 5 - nop in gap
-	wait_for_clk_low
-	LSR R30.b0, R14, 1
-	wait_for_clk_high
+	; Bit 3 - nop in gap
+	send_bit_n 3
 	nop ; delay to ensure we don't get stale clock values
 
-	; Bit 6 - nop in gap
-	wait_for_clk_low
-	LSL R30.b0, R14, 0
-	wait_for_clk_high
+	; Bit 2 - nop in gap
+	send_bit_n 2
 	nop ; delay to ensure we don't get stale clock values
 
-	; Bit 7 - loop in gap
-	wait_for_clk_low
-	LSL R30.b0, R14, 1
-	wait_for_clk_high
+	; Bit 1 - nop in gap
+	send_bit_n 1
+	nop ; delay to ensure we don't get stale clock values
+
+	; Bit 0 - loop in gap
+	send_bit_n 0
 	QBNE send_next_byte, R15, 0
 
 	jmp r3.w2
@@ -131,52 +146,36 @@ send_next_byte_25Mhz:
 	; current_byte = next_byte
 	mov	r14, r1
 
-	; Bit 0 - use gap to inc ptr
-	wait_for_clk_high
-	LSR R30.b0, R14, 6
-	wait_for_clk_low
+	; Bit 7 - use gap to inc ptr
+	send_bit_rev_n 7
 	ADD R0, R0, 1
 
-	; Bit 1 - use gap to load next byte
-	wait_for_clk_high
-	LSR R30.b0, R14, 5
-	wait_for_clk_low
+	; Bit 6 - use gap to load next byte
+	send_bit_rev_n 6
 	LBBO &R1.b0, R0, 0, 1
 
-	; Bit 2 - use gap to dec len
-	wait_for_clk_high
-	LSR R30.b0, R14, 4
-	wait_for_clk_low
+	; Bit 5 - use gap to dec len
+	send_bit_rev_n 5
 	SUB R15, R15, 1
 
-	; Bit 3 - nop in gap
-	wait_for_clk_high
-	LSR R30.b0, R14, 3
-	wait_for_clk_low
-	nop ; delay to ensure we don't get stale clock values
-
 	; Bit 4 - nop in gap
-	wait_for_clk_high
-	LSR R30.b0, R14, 2
-	wait_for_clk_low
+	send_bit_rev_n 4
 	nop ; delay to ensure we don't get stale clock values
 
-	; Bit 5 - nop in gap
-	wait_for_clk_high
-	LSR R30.b0, R14, 1
-	wait_for_clk_low
+	; Bit 3 - nop in gap
+	send_bit_rev_n 3
 	nop ; delay to ensure we don't get stale clock values
 
-	; Bit 6 - nop in gap
-	wait_for_clk_high
-	LSL R30.b0, R14, 0
-	wait_for_clk_low
+	; Bit 2 - nop in gap
+	send_bit_rev_n 2
 	nop ; delay to ensure we don't get stale clock values
 
-	; Bit 7 - loop in gap
-	wait_for_clk_high
-	LSL R30.b0, R14, 1
-	wait_for_clk_low
+	; Bit 1 - nop in gap
+	send_bit_rev_n 1
+	nop ; delay to ensure we don't get stale clock values
+
+	; Bit 0 - loop in gap
+	send_bit_rev_n 0
 	QBNE send_next_byte_25Mhz, R15, 0
 
 	jmp r3.w2
