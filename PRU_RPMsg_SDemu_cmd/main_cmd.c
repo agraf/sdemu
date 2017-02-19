@@ -514,7 +514,6 @@ unsigned char crc7_cmd(register uint8_t cmd, register uint32_t args)
 }
 
 static void read_cmd(void);
-void read_and_run_cmd(void);
 
 enum send_mode {
 	SEND_MODE,
@@ -762,12 +761,8 @@ void main(void)
 	}
 
 	while (1) {
-#if 1
 		if ((hwversion == SDEMU_V1_0) || (__R31 & VCC_MASK))
 			read_cmd();
-#else
-		read_and_run_cmd();
-#endif
 	}
 }
 
