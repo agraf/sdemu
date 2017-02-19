@@ -130,153 +130,107 @@ send_next_byte:
 	jmp r3.w2
 
 
-
-
-; When running in high frequency mode (25Mhz), switching the
-; pins is not fast enough. We have to instead rely on our own
-; clock (200Mhz) and add delay instructions to align our code
-; flow with the incoming clock
+; The PRUs have some internal delay between input and output.
+; Measurements show that this delay is somewhere between 20 and
+; 40 ns.
 ;
-; We know that setting a bit in R30 takes 20ns (4 instructions)
-; to arrive on the wire. So we need to fire a new bit when CLK
-; goes high even though the host controller reads the bit when
-; CLK goes from low->high
+; When running in 25Mhz mode, this means that by the time we see
+; the signal going down, it's already gone up and we should have
+; written a proper value to the line.
+;
+; The workaround set in place here simply set the next bit whenever
+; we see CLK going up rather than down. That way (in continuous
+; CLK environments) we give ourselves 20ns head start.
 
 send_buf_1bit_startend_25Mhz:
 
 	; Align ourselves with the clock
+	wait_for_clk_high
+	nop
+	nop
 	wait_for_clk_low
 	nop
 	nop
 	wait_for_clk_high
 
 	; We're now at the point where we need to submit the start
-	; bit. We have 8 cycles (5ns * 8 = 40ns) for each bit.
+	; bit. After that follows the payload.
 
 	; Start Bit
 	ldi r30.w0, 0							; 1 cycle (7 left)
-
-	; Delay until it's time for the next bit
-	nop 									; 1 cycle (6 left)
-	nop 									; 1 cycle (5 left)
-	nop 									; 1 cycle (4 left)
-	nop 									; 1 cycle (3 left)
-	nop 									; 1 cycle (2 left)
-	nop 									; 1 cycle (1 left)
-	nop 									; 1 cycle (0 left)
+	nop
+	wait_for_clk_low
 
 send_next_byte_startend_25Mhz:
-
-	; Bit 7 - using next_byte rather than current_byte
-	LSR R30.b0, R1, 7						; v1.1 (7 left)
-	LSR R30.b1, R1, 7						; v1.0 (6 left)
-
 	; current_byte = next_byte
-	mov	r14, r1								; 1 cycle (5 left)
+	mov	r14, r1
 
-	; Increase pointer
-	ADD R0, R0, 1							; 1 cycle (4 left)
+	; Bit 7 - use gap to inc ptr
+	wait_for_clk_high
+	LSR R30.b0, R14, 7	; v1.1
+	LSR R30.b1, R14, 7	; v1.0
+	wait_for_clk_low
+	ADD R0, R0, 1
+	nop ; delay to ensure we don't get stale clock values
 
-	; Load next_byte
-	LBBO &R1.b0, R0, 0, 1					; 3 cycles (1 left)
+	; Bit 6 - use gap to load next byte
+	wait_for_clk_high
+	LSR R30.b0, R14, 6	; v1.1
+	LSR R30.b1, R14, 6	; v1.0
+	wait_for_clk_low
+	LBBO &R1.b0, R0, 0, 1
 
-	; Decrease len
-	SUB R15, R15, 1							; 1 cycle (0 left)
+	; Bit 5 - use gap to dec len
+	wait_for_clk_high
+	LSR R30.b0, R14, 5	; v1.1
+	LSR R30.b1, R14, 5	; v1.0
+	wait_for_clk_low
+	SUB R15, R15, 1
+	nop ; delay to ensure we don't get stale clock values
 
-	; Bit 6
-	LSR R30.b0, R14, 6						; v1.1 (7 left)
-	LSR R30.b1, R14, 6						; v1.0 (6 left)
+	; Bit 4 - nop in gap
+	wait_for_clk_low
+	LSR R30.b0, R14, 4	; v1.1
+	LSR R30.b1, R14, 4	; v1.0
+	wait_for_clk_high
+	nop ; delay to ensure we don't get stale clock values
+	nop ; delay to ensure we don't get stale clock values
 
-	; Delay until it's time for the next bit
-	nop 									; 1 cycle (5 left)
-	nop 									; 1 cycle (4 left)
-	nop 									; 1 cycle (3 left)
-	nop 									; 1 cycle (2 left)
-	nop 									; 1 cycle (1 left)
-	nop 									; 1 cycle (0 left)
+	; Bit 3 - nop in gap
+	wait_for_clk_high
+	LSR R30.b0, R14, 3	; v1.1
+	LSR R30.b1, R14, 3	; v1.0
+	wait_for_clk_low
+	nop ; delay to ensure we don't get stale clock values
+	nop ; delay to ensure we don't get stale clock values
 
-	; Bit 5
-	LSR R30.b0, R14, 5						; v1.1 (7 left)
-	LSR R30.b1, R14, 5						; v1.0 (6 left)
+	; Bit 2 - nop in gap
+	wait_for_clk_high
+	LSR R30.b0, R14, 2	; v1.1
+	LSR R30.b1, R14, 2	; v1.0
+	wait_for_clk_low
+	nop ; delay to ensure we don't get stale clock values
+	nop ; delay to ensure we don't get stale clock values
 
-	; Delay until it's time for the next bit
-	nop 									; 1 cycle (5 left)
-	nop 									; 1 cycle (4 left)
-	nop 									; 1 cycle (3 left)
-	nop 									; 1 cycle (2 left)
-	nop 									; 1 cycle (1 left)
-	nop 									; 1 cycle (0 left)
+	; Bit 1 - nop in gap
+	wait_for_clk_high
+	LSR R30.b0, R14, 1	; v1.1
+	LSR R30.b1, R14, 1	; v1.0
+	wait_for_clk_low
+	nop ; delay to ensure we don't get stale clock values
+	nop ; delay to ensure we don't get stale clock values
 
-	; Bit 4
-	LSR R30.b0, R14, 4						; v1.1 (7 left)
-	LSR R30.b1, R14, 4						; v1.0 (6 left)
+	; Bit 0 - loop in gap
+	wait_for_clk_high
+	LSR R30.b0, R14, 0	; v1.1
+	LSR R30.b1, R14, 0	; v1.0
+	wait_for_clk_low
+	QBNE send_next_byte_startend_25Mhz, R15, 0
 
-	; Delay until it's time for the next bit
-	nop 									; 1 cycle (5 left)
-	nop 									; 1 cycle (4 left)
-	nop 									; 1 cycle (3 left)
-	nop 									; 1 cycle (2 left)
-	nop 									; 1 cycle (1 left)
-	nop 									; 1 cycle (0 left)
-
-	; Bit 3
-	LSR R30.b0, R14, 3						; v1.1 (7 left)
-	LSR R30.b1, R14, 3						; v1.0 (6 left)
-
-	; Delay until it's time for the next bit
-	nop 									; 1 cycle (5 left)
-	nop 									; 1 cycle (4 left)
-	nop 									; 1 cycle (3 left)
-	nop 									; 1 cycle (2 left)
-	nop 									; 1 cycle (1 left)
-	nop 									; 1 cycle (0 left)
-
-	; Bit 2
-	LSR R30.b0, R14, 2						; v1.1 (7 left)
-	LSR R30.b1, R14, 2						; v1.0 (6 left)
-
-	; Delay until it's time for the next bit
-	nop 									; 1 cycle (5 left)
-	nop 									; 1 cycle (4 left)
-	nop 									; 1 cycle (3 left)
-	nop 									; 1 cycle (2 left)
-	nop 									; 1 cycle (1 left)
-	nop 									; 1 cycle (0 left)
-
-	; Bit 1
-	LSR R30.b0, R14, 1						; v1.1 (7 left)
-	LSR R30.b1, R14, 1						; v1.0 (6 left)
-
-	; Delay until it's time for the next bit
-	nop 									; 1 cycle (5 left)
-	nop 									; 1 cycle (4 left)
-	nop 									; 1 cycle (3 left)
-	nop 									; 1 cycle (2 left)
-	nop 									; 1 cycle (1 left)
-	nop 									; 1 cycle (0 left)
-
-	; Bit 0
-	LSR R30.b0, R14, 0						; v1.1 (7 left)
-	LSR R30.b1, R14, 0						; v1.0 (6 left)
-
-	; Delay until it's time for the next bit
-	nop 									; 1 cycle (5 left)
-	nop 									; 1 cycle (4 left)
-	nop 									; 1 cycle (3 left)
-	nop 									; 1 cycle (2 left)
-	nop 									; 1 cycle (1 left)
-	QBNE send_next_byte_startend_25Mhz, R15, 0	; 1 cycle (0 left)
-
-	; End Bit
+	; End bit
+	wait_for_clk_high
 	LDI R30.w0, 256
-
-	; Delay until it's time for the next bit
-	nop 									; 1 cycle (6 left)
-	nop 									; 1 cycle (5 left)
-	nop 									; 1 cycle (4 left)
-	nop 									; 1 cycle (3 left)
-	nop 									; 1 cycle (2 left)
-	nop 									; 1 cycle (1 left)
-	nop 									; 1 cycle (0 left)
+	nop ; delay to ensure we don't get stale clock values
+	wait_for_clk_low
 
 	jmp r3.w2
