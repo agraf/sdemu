@@ -40,6 +40,9 @@ send_buf_1bit_startend:
 	; R15	len (decreasing)
 
 	; Check if we're in 25Mhz mode
+	wait_for_clk_high
+	nop
+	nop
 	wait_for_clk_low
 	nop
 	nop
@@ -58,63 +61,63 @@ send_next_byte:
 
 	; Bit 7 - use gap to inc ptr
 	wait_for_clk_low
-	LSL R30.w0, R14, 1
-	nop ; delay to ensure we don't get stale clock values
+	LSR R30.b0, R14, 7	; v1.1
+	LSR R30.b1, R14, 7	; v1.0
 	wait_for_clk_high
 	ADD R0, R0, 1
 	nop ; delay to ensure we don't get stale clock values
 
 	; Bit 6 - use gap to load next byte
 	wait_for_clk_low
-	LSL R30.w0, R14, 2
-	nop ; delay to ensure we don't get stale clock values
+	LSR R30.b0, R14, 6	; v1.1
+	LSR R30.b1, R14, 6	; v1.0
 	wait_for_clk_high
 	LBBO &R1.b0, R0, 0, 1
 
 	; Bit 5 - use gap to dec len
 	wait_for_clk_low
-	LSL R30.w0, R14, 3
-	nop ; delay to ensure we don't get stale clock values
+	LSR R30.b0, R14, 5	; v1.1
+	LSR R30.b1, R14, 5	; v1.0
 	wait_for_clk_high
 	SUB R15, R15, 1
 	nop ; delay to ensure we don't get stale clock values
 
 	; Bit 4 - nop in gap
 	wait_for_clk_low
-	LSL R30.w0, R14, 4
-	nop ; delay to ensure we don't get stale clock values
+	LSR R30.b0, R14, 4	; v1.1
+	LSR R30.b1, R14, 4	; v1.0
 	wait_for_clk_high
 	nop ; delay to ensure we don't get stale clock values
 	nop ; delay to ensure we don't get stale clock values
 
 	; Bit 3 - nop in gap
 	wait_for_clk_low
-	LSL R30.w0, R14, 5
-	nop ; delay to ensure we don't get stale clock values
+	LSR R30.b0, R14, 3	; v1.1
+	LSR R30.b1, R14, 3	; v1.0
 	wait_for_clk_high
 	nop ; delay to ensure we don't get stale clock values
 	nop ; delay to ensure we don't get stale clock values
 
 	; Bit 2 - nop in gap
 	wait_for_clk_low
-	LSL R30.w0, R14, 6
-	nop ; delay to ensure we don't get stale clock values
+	LSR R30.b0, R14, 2	; v1.1
+	LSR R30.b1, R14, 2	; v1.0
 	wait_for_clk_high
 	nop ; delay to ensure we don't get stale clock values
 	nop ; delay to ensure we don't get stale clock values
 
 	; Bit 1 - nop in gap
 	wait_for_clk_low
-	LSL R30.w0, R14, 7
-	nop ; delay to ensure we don't get stale clock values
+	LSR R30.b0, R14, 1	; v1.1
+	LSR R30.b1, R14, 1	; v1.0
 	wait_for_clk_high
 	nop ; delay to ensure we don't get stale clock values
 	nop ; delay to ensure we don't get stale clock values
 
 	; Bit 0 - loop in gap
 	wait_for_clk_low
-	LSL R30.w0, R14, 8
-	nop ; delay to ensure we don't get stale clock values
+	LSR R30.b0, R14, 0	; v1.1
+	LSR R30.b1, R14, 0	; v1.0
 	wait_for_clk_high
 	QBNE send_next_byte, R15, 0
 
@@ -164,65 +167,27 @@ send_buf_1bit_startend_25Mhz:
 
 send_next_byte_startend_25Mhz:
 
-	; Bit 0 - using next_byte rather than current_byte
-	LSL R30.w0, R1, 1							; 1 cycle (7 left)
+	; Bit 7 - using next_byte rather than current_byte
+	LSR R30.b0, R1, 7						; v1.1 (7 left)
+	LSR R30.b1, R1, 7						; v1.0 (6 left)
 
 	; current_byte = next_byte
-	mov	r14, r1								; 1 cycle (6 left)
+	mov	r14, r1								; 1 cycle (5 left)
 
 	; Increase pointer
-	ADD R0, R0, 1							; 1 cycle (5 left)
+	ADD R0, R0, 1							; 1 cycle (4 left)
 
 	; Load next_byte
-	LBBO &R1.b0, R0, 0, 1					; 3 cycles (2 left)
+	LBBO &R1.b0, R0, 0, 1					; 3 cycles (1 left)
 
 	; Decrease len
-	SUB R15, R15, 1							; 1 cycle (1 left)
+	SUB R15, R15, 1							; 1 cycle (0 left)
+
+	; Bit 6
+	LSR R30.b0, R14, 6						; v1.1 (7 left)
+	LSR R30.b1, R14, 6						; v1.0 (6 left)
 
 	; Delay until it's time for the next bit
-	nop 									; 1 cycle (0 left)
-
-	; Bit 1
-	LSL R30.w0, R14, 2							; 1 cycle (7 left)
-
-	; Delay until it's time for the next bit
-	nop 									; 1 cycle (6 left)
-	nop 									; 1 cycle (5 left)
-	nop 									; 1 cycle (4 left)
-	nop 									; 1 cycle (3 left)
-	nop 									; 1 cycle (2 left)
-	nop 									; 1 cycle (1 left)
-	nop 									; 1 cycle (0 left)
-
-	; Bit 2
-	LSL R30.w0, R14, 3							; 1 cycle (7 left)
-
-	; Delay until it's time for the next bit
-	nop 									; 1 cycle (6 left)
-	nop 									; 1 cycle (5 left)
-	nop 									; 1 cycle (4 left)
-	nop 									; 1 cycle (3 left)
-	nop 									; 1 cycle (2 left)
-	nop 									; 1 cycle (1 left)
-	nop 									; 1 cycle (0 left)
-
-	; Bit 3
-	LSL R30.w0, R14, 4							; 1 cycle (7 left)
-
-	; Delay until it's time for the next bit
-	nop 									; 1 cycle (6 left)
-	nop 									; 1 cycle (5 left)
-	nop 									; 1 cycle (4 left)
-	nop 									; 1 cycle (3 left)
-	nop 									; 1 cycle (2 left)
-	nop 									; 1 cycle (1 left)
-	nop 									; 1 cycle (0 left)
-
-	; Bit 4
-	LSL R30.w0, R14, 5							; 1 cycle (7 left)
-
-	; Delay until it's time for the next bit
-	nop 									; 1 cycle (6 left)
 	nop 									; 1 cycle (5 left)
 	nop 									; 1 cycle (4 left)
 	nop 									; 1 cycle (3 left)
@@ -231,10 +196,10 @@ send_next_byte_startend_25Mhz:
 	nop 									; 1 cycle (0 left)
 
 	; Bit 5
-	LSL R30.w0, R14, 6							; 1 cycle (7 left)
+	LSR R30.b0, R14, 5						; v1.1 (7 left)
+	LSR R30.b1, R14, 5						; v1.0 (6 left)
 
 	; Delay until it's time for the next bit
-	nop 									; 1 cycle (6 left)
 	nop 									; 1 cycle (5 left)
 	nop 									; 1 cycle (4 left)
 	nop 									; 1 cycle (3 left)
@@ -242,11 +207,11 @@ send_next_byte_startend_25Mhz:
 	nop 									; 1 cycle (1 left)
 	nop 									; 1 cycle (0 left)
 
-	; Bit 6
-	LSL R30.w0, R14, 7							; 1 cycle (7 left)
+	; Bit 4
+	LSR R30.b0, R14, 4						; v1.1 (7 left)
+	LSR R30.b1, R14, 4						; v1.0 (6 left)
 
 	; Delay until it's time for the next bit
-	nop 									; 1 cycle (6 left)
 	nop 									; 1 cycle (5 left)
 	nop 									; 1 cycle (4 left)
 	nop 									; 1 cycle (3 left)
@@ -254,11 +219,47 @@ send_next_byte_startend_25Mhz:
 	nop 									; 1 cycle (1 left)
 	nop 									; 1 cycle (0 left)
 
-	; Bit 7
-	LSL R30.w0, R14, 8							; 1 cycle (7 left)
+	; Bit 3
+	LSR R30.b0, R14, 3						; v1.1 (7 left)
+	LSR R30.b1, R14, 3						; v1.0 (6 left)
 
 	; Delay until it's time for the next bit
-	nop 									; 1 cycle (6 left)
+	nop 									; 1 cycle (5 left)
+	nop 									; 1 cycle (4 left)
+	nop 									; 1 cycle (3 left)
+	nop 									; 1 cycle (2 left)
+	nop 									; 1 cycle (1 left)
+	nop 									; 1 cycle (0 left)
+
+	; Bit 2
+	LSR R30.b0, R14, 2						; v1.1 (7 left)
+	LSR R30.b1, R14, 2						; v1.0 (6 left)
+
+	; Delay until it's time for the next bit
+	nop 									; 1 cycle (5 left)
+	nop 									; 1 cycle (4 left)
+	nop 									; 1 cycle (3 left)
+	nop 									; 1 cycle (2 left)
+	nop 									; 1 cycle (1 left)
+	nop 									; 1 cycle (0 left)
+
+	; Bit 1
+	LSR R30.b0, R14, 1						; v1.1 (7 left)
+	LSR R30.b1, R14, 1						; v1.0 (6 left)
+
+	; Delay until it's time for the next bit
+	nop 									; 1 cycle (5 left)
+	nop 									; 1 cycle (4 left)
+	nop 									; 1 cycle (3 left)
+	nop 									; 1 cycle (2 left)
+	nop 									; 1 cycle (1 left)
+	nop 									; 1 cycle (0 left)
+
+	; Bit 0
+	LSR R30.b0, R14, 0						; v1.1 (7 left)
+	LSR R30.b1, R14, 0						; v1.0 (6 left)
+
+	; Delay until it's time for the next bit
 	nop 									; 1 cycle (5 left)
 	nop 									; 1 cycle (4 left)
 	nop 									; 1 cycle (3 left)

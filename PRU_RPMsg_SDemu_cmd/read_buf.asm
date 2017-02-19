@@ -10,6 +10,9 @@
 ;   buf: pointer to buffer that should get read
 ;   len: number of bytes to read starting with a 0 bit
 ;
+; Beware that this function will read the buffer in reverse,
+; so that we can easily cast to Little Endian variables.
+;
 
 wait_for_clk_low .macro
 		wbc r31, 0
@@ -35,9 +38,9 @@ read_buf_cmd:
 	; R14	ptr
 	; R15	len
 
-	; Copy ptr-1 to r0. We need to start at -1 because we
-	; always increment ptr per byte before store
-	SUB	R0, R14, 1
+	; Copy ptr+len to r0. We need to start at +1 because we
+	; always decrement ptr per byte before store
+	ADD	R0, R14, R15
 
 	; Ensure the to-be-read byte is 0 initialized
 	LDI r1, 0 ; current_byte = 0
@@ -64,9 +67,9 @@ read_next_byte:
 	SET r1.b0, r1.b0, 7
 read_bit7_clear:
 
-	; Bit 6 - use gap to increment ptr
+	; Bit 6 - use gap to decrement ptr
 	wait_for_clk_low
-	ADD R0, R0, 1
+	SUB R0, R0, 1
 	wait_for_clk_high
 	qbbc read_bit6_clear, r31, 1
 	set r1.b0, r1.b0, 6
@@ -124,6 +127,66 @@ read_bit0_clear:
 	QBNE read_next_byte, R15, 0
 
     ; final byte write
-	SBBO &r1.b0, r0, 0, 1; store byte, skip this for the first round (jumps below)
+	SBBO &r1.b0, r0, 0, 1; store final byte
 
+	jmp r3.w2
+
+read_n_bits .macro R_TARGET, R_CTR, BITS
+		.newblock
+		ldi R_CTR, BITS						; ctr = 7 (bits for cmd)
+		loop $1, BITS						; Read for every bit
+		wait_for_clk_low					; Wait for clock to go down
+		sub R_CTR, R_CTR, 1					; bit_nr = ctr-1
+		wait_for_clk_high					; Wait for clock to go up (Signal for bit)
+		qbbc $1, r31, 1						; Skip bit if 0
+		SET R_TARGET, R_TARGET, R_CTR		; Set bit_nr in r1
+$1:
+	.endm
+
+	.global cmd_table
+	.global read_and_run_cmd
+read_and_run_cmd:
+	; Free up r5 & lr
+	sub r2, r2, 6
+	sbbo &r5, r2, 0, 4
+	sbbo &r3.w2, r2, 4, 2
+
+	; Load ptr to cmd_table
+	LDI	r5, cmd_table
+
+	; Ensure cmd and args are 0 initialized
+	LDI r14, 0 ; args = 0
+	LDI r15, 0 ; cmd = 0
+
+	; R5	cmd_table
+	; R14	args
+	; R15	cmd
+	; R16	bit counter
+	; R17	scratch register
+
+	; wait for the cmd to start
+cmd_not_started_yet2:
+	and r17, r31, 3
+	QBNE cmd_not_started_yet2, R17, 1	; Loop until CLK=1 CMD=0
+	wait_for_clk_high					; Signal for start bit
+
+	read_n_bits r14, r16, 7				; Read cmd
+	read_n_bits r15, r16, 32			; Read args
+	; Ignore CRC7, we need the time for processing
+
+	; XXX Check for illegal commands
+	; qbgt 0x3f ...
+
+	; Call cmd handler
+	and r16, r14, 0x3f					; r16 = cmd & 0x3f
+	lsl r16, r16, 1						; r16 <<= 1
+	LBBO &r17, r5, r16, 2				; r17 = cmd_table[r16]
+	jal r3.w2, r17.w0					; call *r17
+
+	; Restore r5 & lr
+	lbbo &r3.w2, r2, 4, 2
+	lbbo &r5, r2, 0, 4
+	add r2, r2, 6
+
+	; Return
 	jmp r3.w2

@@ -24,4 +24,11 @@
 		<nature>org.eclipse.cdt.core.ccnature</nature>
 		<nature>org.eclipse.cdt.managedbuilder.core.ScannerConfigNature</nature>
 	</natures>
+	<linkedResources>
+		<link>
+			<name>sdemu_icc.h</name>
+			<type>1</type>
+			<locationURI>PARENT-1-PROJECT_LOC/PRU_RPMsg_SDemu_data/sdemu_icc.h</locationURI>
+		</link>
+	</linkedResources>
 </projectDescription>

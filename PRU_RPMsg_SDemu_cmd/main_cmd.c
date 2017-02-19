@@ -48,7 +48,7 @@
 #include "hw_types.h"
 #include "soc_AM335x.h"
 #include "hw_control_AM335x.h"
-
+#include "../PRU_RPMsg_SDemu_data/sdemu_icc.h"
 
 volatile register uint32_t __R30;	/* OUT */
 volatile register uint32_t __R31;	/* IN */
@@ -166,15 +166,7 @@ static uint32_t card_status = CARD_STATUS_RESET;
 #define OCR_V29_30			(1 << 17)
 #define OCR_V28_29			(1 << 16)
 #define OCR_V27_28			(1 << 15)
-#define OCR_VOLTAGE_MASK		(OCR_V35_36 | \
-					 OCR_V34_35 | \
-					 OCR_V33_34 | \
-					 OCR_V32_33 | \
-					 OCR_V31_32 | \
-					 OCR_V30_31 | \
-					 OCR_V29_30 | \
-					 OCR_V28_29 | \
-					 OCR_V27_28)
+#define OCR_VOLTAGE_MASK	(OCR_V33_34 | OCR_V32_33)
 
 static uint32_t ocr = OCR_VOLTAGE_MASK;
 
@@ -342,18 +334,6 @@ uint32_t rca;
 //#define PRU_DATA __far __attribute__((cregister("PRU_DMEM_DATA", far), peripheral))
 //#define PRU_FAST __far __attribute__((cregister("PRU_DMEM_FAST", far), peripheral))
 
-enum pru1_mode {
-	pru1_mode_idle,
-	pru1_mode_read_4bit,
-	pru1_mode_write_4bit,
-	pru1_mode_read_1bit,
-	pru1_mode_write_1bit,
-	pru1_mode_set_recv,
-	pru1_mode_set_send,
-	pru1_mode_read_scr_4bit,
-	pru1_mode_read_scr_1bit,
-};
-
 #pragma DATA_SECTION(requested_mode, ".pru1data");
 #pragma RETAIN(requested_mode)
 volatile enum pru1_mode requested_mode;
@@ -396,6 +376,14 @@ uint8_t bus_width = SD_BUS_1BIT;
 #define DAT0_MASK	(1 << 2)
 #define DAT1_MASK	(1 << 7)
 
+/* v1.1 additions */
+#define USE_V1_1
+#define VCC_MASK			(1 << 16)
+#define DAT_OUT_OFF_MASK	(1 << 14)
+#define CMD_OUT_MASK		(1 << 7)
+#define CMD_OUT_OFF_MASK	(1 << 15)
+
+enum sdemu_hwversion hwversion = SDEMU_V1_0;
 
 /* Host-0 Interrupt sets bit 30 in register R31 */
 #define HOST_INT			((uint32_t) 1 << 30)
@@ -420,20 +408,6 @@ uint8_t bus_width = SD_BUS_1BIT;
 #define INT_ENABLE (1 << 5)
 #define INT_OFFSET 16
 
-#define SDEMU_MSG_DBG					' '
-#define SDEMU_MSG_SETPINS_CMD_IN		'1'
-#define SDEMU_MSG_SETPINS_CMD_OUT		'2'
-#define SDEMU_MSG_SETPINS_DAT_IN		'3'
-#define SDEMU_MSG_SETPINS_DAT_OUT		'4'
-#define SDEMU_MSG_SETPINS_SPI			'5'
-#define SDEMU_MSG_SETPINS_RESET			'6'
-#define SDEMU_MSG_QUERY_SD_INIT			'I'
-#define SDEMU_MSG_SET_SIZE				'S'
-#define SDEMU_MSG_PREAD_4BIT			'R'
-#define SDEMU_MSG_PWRITE_4BIT			'W'
-#define SDEMU_MSG_DONE					'\0'
-
-
 /*
  * Using the name 'rpmsg-pru' will probe the rpmsg_pru driver found
  * at linux-x.y.z/drivers/rpmsg/rpmsg_pru.c
@@ -455,7 +429,7 @@ int is_initialized = 0;
 struct pru_rpmsg_transport transport;
 uint16_t src, dst;
 
-extern void send_buf_1bit_dat(register uint8_t *buf, register uint32_t len);
+extern void send_buf_cmd(register uint8_t *buf, register uint32_t len);
 extern void read_buf_cmd(uint8_t *buf, uint32_t len);
 
 static char *alloc_buf(int len)
@@ -540,6 +514,7 @@ unsigned char crc7_cmd(register uint8_t cmd, register uint32_t args)
 }
 
 static void read_cmd(void);
+void read_and_run_cmd(void);
 
 enum send_mode {
 	SEND_MODE,
@@ -553,12 +528,16 @@ static void switch_to_recv(void)
 	if (in_send_mode == RECV_MODE)
 		return;
 
-	/* Send ARM host message */
-	fast_cmd = SDEMU_MSG_SETPINS_CMD_IN;
-	__R31 = (INT_ENABLE | (FAST_INT - INT_OFFSET));
+	if (hwversion == SDEMU_V1_0) {
+		/* Send ARM host message */
+		fast_cmd = SDEMU_MSG_SETPINS_CMD_IN;
+		__R31 = (INT_ENABLE | (FAST_INT - INT_OFFSET));
 
-	/* Wait for msg to comlete */
-	while (fast_cmd != SDEMU_MSG_DONE) ;
+		/* Wait for msg to comlete */
+		while (fast_cmd != SDEMU_MSG_DONE) ;
+	} else {
+		__R30 &= ~CMD_OUT_OFF_MASK;
+	}
 
 	in_send_mode = RECV_MODE;
 }
@@ -571,26 +550,58 @@ static void switch_to_send(void)
 	/* Pull CMD line high, so that nobody gets the idea we're switched yet */
 	__R30 |= CMD_MASK;
 
-	/* Send ARM host message */
-	fast_cmd = SDEMU_MSG_SETPINS_CMD_OUT;
-	__R31 = (INT_ENABLE | (FAST_INT - INT_OFFSET));
+	if (hwversion == SDEMU_V1_0) {
+		/* Send ARM host message */
+		fast_cmd = SDEMU_MSG_SETPINS_CMD_OUT;
+		__R31 = (INT_ENABLE | (FAST_INT - INT_OFFSET));
 
-	/* Wait for msg to comlete */
-	while (fast_cmd != SDEMU_MSG_DONE) ;
+		/* Wait for msg to comlete */
+		while (fast_cmd != SDEMU_MSG_DONE) ;
+	} else {
+		__R30 |= CMD_OUT_OFF_MASK;
+	}
 
 	in_send_mode = SEND_MODE;
 }
 
+static enum send_mode data_in_send_mode = UNKNOWN_MODE;
+
 static void switch_to_data_recv(void)
 {
-	requested_mode = pru1_mode_set_recv;
-	while (active_mode != pru1_mode_set_recv) ;
+	if (data_in_send_mode == RECV_MODE)
+		return;
+
+	if (hwversion == SDEMU_V1_0) {
+		/* Send ARM host message */
+		fast_cmd = SDEMU_MSG_SETPINS_DAT_IN;
+		__R31 = (INT_ENABLE | (FAST_INT - INT_OFFSET));
+
+		/* Wait for msg to comlete */
+		while (fast_cmd != SDEMU_MSG_DONE) ;
+	} else {
+		__R30 &= ~DAT_OUT_OFF_MASK;
+	}
+
+	data_in_send_mode = RECV_MODE;
 }
 
 static void switch_to_data_send(void)
 {
-	requested_mode = pru1_mode_set_send;
-	while (active_mode != pru1_mode_set_send) ;
+	if (data_in_send_mode == SEND_MODE)
+		return;
+
+	if (hwversion == SDEMU_V1_0) {
+		/* Send ARM host message */
+		fast_cmd = SDEMU_MSG_SETPINS_DAT_OUT;
+		__R31 = (INT_ENABLE | (FAST_INT - INT_OFFSET));
+
+		/* Wait for msg to comlete */
+		while (fast_cmd != SDEMU_MSG_DONE) ;
+	} else {
+		__R30 |= DAT_OUT_OFF_MASK;
+	}
+
+	data_in_send_mode = SEND_MODE;
 }
 
 static void enable_pins(void)
@@ -637,11 +648,24 @@ static void print_int(const char *str, register int line_nr)
 	pru_rpmsg_send(&transport, dst, src, b, 9 + slen + 1);
 }
 
+static void drain_rpmsg(void)
+{
+	/* Check bit 30 of register R31 to see if the ARM has kicked us */
+	if (__R31 & HOST_INT) {
+		uint16_t len;
+		uint16_t tmp_src, tmp_dst;
+
+		clear_arm_irq();
+		while (pru_rpmsg_receive(&transport, &tmp_src, &tmp_dst, buf, &len) == PRU_RPMSG_SUCCESS) ;
+	}
+}
+
 static void query_sd_size(void)
 {
 	uint64_t size = 0;
 	uint32_t sectors = 0;
 
+#if 0
 	/* Send ARM host message */
 	fast_cmd = SDEMU_MSG_SET_SIZE;
 	fast_arg1 = (long)&size;
@@ -649,6 +673,24 @@ static void query_sd_size(void)
 
 	/* Wait for msg to comlete */
 	while (fast_cmd != SDEMU_MSG_DONE) ;
+#else
+	struct sdemu_msg_get_size get_size = { 0 };
+	uint8_t req = SDEMU_MSG_GET_SIZE;
+	uint16_t len, tmp_src, tmp_dst;
+
+	drain_rpmsg();
+	pru_rpmsg_send(&transport, dst, src, &req, sizeof(req));
+
+	/* Wait for and receive reply */
+	while (pru_rpmsg_receive(&transport, &tmp_src, &tmp_dst, &get_size, &len) != PRU_RPMSG_SUCCESS) ;
+
+	/* Clear the event status */
+	clear_arm_irq();
+
+	print_int("SD SIZE reply cmd: ", get_size.cmd);
+	print_int("SD SIZE reply size: ", get_size.size);
+	size = get_size.size;
+#endif
 
 	print_int("SD size: ", size);
 	sectors = SD_SECTORS(size);
@@ -720,7 +762,12 @@ void main(void)
 	}
 
 	while (1) {
-		read_cmd();
+#if 1
+		if ((hwversion == SDEMU_V1_0) || (__R31 & VCC_MASK))
+			read_cmd();
+#else
+		read_and_run_cmd();
+#endif
 	}
 }
 
@@ -762,7 +809,7 @@ static void send_48reply(register uint8_t cmd, register uint32_t args)
 			crc7,
 	};
 
-	send_buf_1bit_dat(buf, sizeof(buf));
+	send_buf_cmd(buf, sizeof(buf));
 }
 
 static void reply_r1(register uint8_t cmd)
@@ -784,7 +831,7 @@ static void reply_r2(uint8_t *reg)
 	};
 
 	switch_to_send();
-	send_buf_1bit_dat(buf, sizeof(buf));
+	send_buf_cmd(buf, sizeof(buf));
 	switch_to_recv();
 }
 
@@ -797,7 +844,7 @@ static void reply_r3()
 	};
 
 	switch_to_send();
-	send_buf_1bit_dat(buf, sizeof(buf));
+	send_buf_cmd(buf, sizeof(buf));
 	switch_to_recv();
 }
 
@@ -867,9 +914,11 @@ static void read_acmd(register uint32_t args)
 		case 0:
 			bus_width = SD_BUS_1BIT;
 			break;
+#if 0
 		case 2:
 			bus_width = SD_BUS_4BIT;
 			break;
+#endif
 		default:
 			print_int("[set bus width] Illegal bus width: ", args);
 			card_status |= ILLEGAL_COMMAND;
@@ -882,7 +931,6 @@ static void read_acmd(register uint32_t args)
 		switch (get_state()) {
 		case sd_transfer_state:
 			should_send_scr = 1;
-			switch_to_data_send();
 			break;
 		default:
 			should_send_scr = 0;
@@ -899,6 +947,7 @@ static void read_acmd(register uint32_t args)
 			requested_mode = pru1_mode_idle;
 			while (active_mode != pru1_mode_idle) ;
 
+			switch_to_data_send();
 			/* Then kick it to SCR read */
 			if (bus_width == SD_BUS_1BIT)
 				requested_mode = pru1_mode_read_scr_1bit;
@@ -940,6 +989,7 @@ static void cmd_go_idle_state(register int curcmd, register int args)
 
 	set_state(sd_idle_state);
 	card_status &= ~CARD_STATUS_B;
+	requested_mode = pru1_mode_idle;
 
 	/* No reply */
 }
@@ -966,6 +1016,27 @@ static void cmd_send_relative_addr(register int curcmd, register int args)
 
 	set_state(sd_standby_state);
 	card_status &= ~CARD_STATUS_B;
+}
+
+static void cmd_switch(register int curcmd, register int args)
+{
+	/* CMD6 */
+
+	uint32_t set = args & 0x80000000;
+	uint32_t index = (args >> 16) & 0xff;
+	uint32_t value = (args >> 8) & 0xff;
+
+	requested_mode = pru1_mode_idle;
+	while (active_mode != pru1_mode_idle) ;
+
+	reply_r1(curcmd);
+	set_state(sd_sendingdata_state);
+	card_status &= ~CARD_STATUS_B;
+
+	/* XXX Update switch data */
+
+	switch_to_data_send();
+	requested_mode = pru1_mode_send_switch;
 }
 
 static void cmd_select_card(register int curcmd, register int args)
@@ -1077,6 +1148,8 @@ static void cmd_stop_transmission(register int curcmd, register int args)
 		break;
 	}
 
+	requested_mode = pru1_mode_idle;
+
 	/* Send R1b response */
 	reply_r1(curcmd);
 
@@ -1115,8 +1188,6 @@ static void cmd_read_multiple_block(register int curcmd, register int args)
 
 	uint64_t addr = (ocr & OCR_CAPACITY) ? ((uint64_t)args << 9) : args;
 
-	switch_to_data_send();
-
 	//card_status |= CARD_IS_LOCKED;
 
 	replyargs = card_status;
@@ -1132,6 +1203,7 @@ static void cmd_read_multiple_block(register int curcmd, register int args)
 		print_int("[reply cmd18] crc7: ",  crc7);
 	}
 
+	switch_to_data_recv();
 	sector = addr;
 	if (bus_width == SD_BUS_1BIT)
 		requested_mode = pru1_mode_read_1bit;
@@ -1164,14 +1236,14 @@ static void cmd_app_cmd(register int curcmd, register int args)
 	card_status &= ~CARD_STATUS_B;
 }
 
-static void (*const cmd_table[0x40])(register int curcmd, register int args) = {
+void (*const cmd_table[0x40])(register int curcmd, register int args) = {
 		[CMD_GO_IDLE_STATE]			= cmd_go_idle_state,		/* CMD0 */
 		[CMD_SEND_OP_CMD]			= cmd_invalid,				/* CMD1 XXX */
 		[CMD_ALL_SEND_CID]			= cmd_send_cid,				/* CMD2 */
 		[CMD_SEND_RELATIVE_ADDR]	= cmd_send_relative_addr,	/* CMD3 */
 		[CMD_SEND_DSR]				= cmd_invalid,				/* CMD4 XXX */
 		[5]							= cmd_invalid_silent,		/* CMD5 SDIO*/
-		[CMD_SWITCH_FUNCTION]		= cmd_invalid,				/* CMD6 XXX */
+		[CMD_SWITCH_FUNCTION]		= cmd_switch,				/* CMD6 */
 		[CMD_SELECT_CARD]			= cmd_select_card,			/* CMD7 */
 		[CMD_SEND_IF_COND]			= cmd_send_if_cond,			/* CMD8 */
 		[CMD_SEND_CSD]				= cmd_send_csd,				/* CMD9 */
@@ -1231,26 +1303,39 @@ static void (*const cmd_table[0x40])(register int curcmd, register int args) = {
 		[63]						= cmd_invalid,				/* CMD63 */
 };
 
-struct sd_cmd {
-	uint8_t cmd;
-	uint32_t args;
-	uint8_t crc7;
-};
+static uint32_t read_be32(void *ptr)
+{
+	uint8_t *p = ptr;
+	uint32_t r;
+
+	r = (((uint32_t)p[0]) << 24) |
+		(((uint32_t)p[1]) << 16) |
+		(((uint32_t)p[2]) << 8) |
+		(((uint32_t)p[3]) << 0);
+
+    return r;
+}
 
 static void read_cmd(void)
 {
-	struct sd_cmd cmd;
+	uint8_t buf[6];
+	uint8_t cmd;
+	uint32_t args;
 
-	/* Read command */
-	read_buf_cmd(&cmd, sizeof(cmd));
+	/* Read command in reverse order (for LE) */
+	read_buf_cmd(buf, sizeof(buf));
+	cmd = buf[5];
+	args = *(uint32_t*)(&buf[1]);
 
 	/* Only interpret host commands */
-	if ((cmd.cmd & 0xc0) != 0x40) {
-		print_int("[ illegal in] CMD: ", cmd.cmd);
+	if ((cmd & 0xc0) != 0x40) {
+		print_int("[ illegal in] CMD: ", cmd);
 		return;
 	}
 
-//	print_int("[ in] CMD: ", curcmd);
+	// print_int("[ in] CMD: ", cmd[0]);
 
-	cmd_table[cmd.cmd & 0x3f](cmd.cmd, cmd.args);
+	asm(" nop;");asm(" nop;");asm(" nop;");asm(" nop;");asm(" nop;");asm(" nop;");asm(" nop;");asm(" nop;");
+	cmd_table[cmd & 0x3f](cmd, args);
+	asm(" nop;");asm(" nop;");asm(" nop;");asm(" nop;");asm(" nop;");asm(" nop;");asm(" nop;");asm(" nop;");
 }

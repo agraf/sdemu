@@ -48,6 +48,7 @@
 #include "hw_types.h"
 #include "soc_AM335x.h"
 #include "hw_control_AM335x.h"
+#include "sdemu_icc.h"
 
 
 volatile register uint32_t __R30;	/* OUT */
@@ -59,6 +60,12 @@ volatile register uint32_t __R31;	/* IN */
 #define DAT2_MASK	(1 << 10)
 #define DAT3_MASK	(1 << 11)
 #define CLK_MASK	(1 << 16)
+
+/* v1.1 additions */
+#define DAT0_OUT_MASK	(1 << 0)
+#define DAT1_OUT_MASK	(1 << 1)
+#define DAT2_OUT_MASK	(1 << 2)
+#define DAT3_OUT_MASK	(1 << 3)
 
 /* Host-1 Interrupt sets bit 31 in register R31 */
 #define HOST_INT			((uint32_t) 1 << 31)
@@ -89,33 +96,9 @@ volatile register uint32_t __R31;	/* IN */
  */
 #define VIRTIO_CONFIG_S_DRIVER_OK	4
 
-#define SDEMU_MSG_DBG					' '
-#define SDEMU_MSG_SETPINS_CMD_IN		'1'
-#define SDEMU_MSG_SETPINS_CMD_OUT		'2'
-#define SDEMU_MSG_SETPINS_DAT_IN		'3'
-#define SDEMU_MSG_SETPINS_DAT_OUT		'4'
-#define SDEMU_MSG_SETPINS_SPI			'5'
-#define SDEMU_MSG_SETPINS_RESET			'6'
-#define SDEMU_MSG_QUERY_SD_INIT			'I'
-#define SDEMU_MSG_SET_SIZE				'S'
-#define SDEMU_MSG_PREAD_4BIT			'R'
-#define SDEMU_MSG_PWRITE_4BIT			'W'
-#define SDEMU_MSG_DONE					'\0'
 
 //#define PRU_DATA __far __attribute__((cregister("PRU_DMEM_DATA", near)))
 //#define PRU_FAST __far __attribute__((cregister("PRU_DMEM_FAST", near)))
-
-enum pru1_mode {
-	pru1_mode_idle,
-	pru1_mode_read_4bit,
-	pru1_mode_write_4bit,
-	pru1_mode_read_1bit,
-	pru1_mode_write_1bit,
-	pru1_mode_set_recv,
-	pru1_mode_set_send,
-	pru1_mode_read_scr_4bit,
-	pru1_mode_read_scr_1bit,
-};
 
 #pragma DATA_SECTION(requested_mode, ".pru1data");
 #pragma RETAIN(requested_mode)
@@ -145,7 +128,7 @@ volatile uint64_t fast_arg2;
 #pragma RETAIN(fast_arg3)
 volatile uint32_t fast_arg3;
 
-uint8_t data_buf[512 + 4];
+struct sdemu_msg_sector current_sector;
 
 static uint8_t buf[512];
 static uint8_t *bufp = buf;
@@ -188,6 +171,23 @@ scr_t scr = {
 		.sd_bus_widths = SD_BUS_1BIT, /* Single DAT line only for now */
 };
 
+uint8_t switch_mode[64 + 2] = {
+		0x00,		/* Maximum current consumption */
+		0x01,
+		0x80,		/* Supported group 6 functions */
+		0x01,
+		0x80,		/* Supported group 5 functions */
+		0x01,
+		0x80,		/* Supported group 4 functions */
+		0x01,
+		0x80,		/* Supported group 3 functions */
+		0x01,
+		0x80,		/* Supported group 2 functions */
+		0x01,
+		0x80,		/* Supported group 1 functions */
+		0x01,
+};
+
 static uint16_t crc16(uint8_t *message, int nBytes,
         uint16_t remainder, uint16_t polynomial)
 {
@@ -219,6 +219,14 @@ static void init_scr_crc16(void)
 	scr.crc16_lo = crc16;
 }
 
+static void init_switch_mode_crc16(void)
+{
+	uint16_t crc16 = crc16ccitt_xmodem((void*)switch_mode, 64);
+
+	switch_mode[64] = crc16 >> 8;
+	switch_mode[65] = crc16;
+}
+
 static uint8_t *alloc_buf(int len)
 {
 	uint8_t *p = bufp;
@@ -237,52 +245,10 @@ static void clear_arm_irq(void)
 	CT_INTC.SICR_bit.STS_CLR_IDX = FROM_ARM_HOST;
 }
 
-enum send_mode {
-	SEND_MODE,
-	RECV_MODE,
-	UNKNOWN_MODE,
-};
-static enum send_mode in_send_mode = UNKNOWN_MODE;
-
-static void switch_to_recv(void)
-{
-	if (in_send_mode == RECV_MODE)
-		return;
-
-	/* Send ARM host message */
-	fast_cmd = SDEMU_MSG_SETPINS_DAT_IN;
-	__R31 = (INT_ENABLE | (FAST_INT - INT_OFFSET));
-
-	/* Wait for msg to comlete */
-	while (fast_cmd != SDEMU_MSG_DONE) ;
-
-	in_send_mode = RECV_MODE;
-}
-
-static void switch_to_send(void)
-{
-	if (in_send_mode == SEND_MODE)
-		return;
-
-	/* Pull DATA lines high, so that nobody gets the idea we're switched yet */
-	__R30 = DAT0_MASK | DAT1_MASK | DAT2_MASK | DAT3_MASK;
-
-	/* Send ARM host message */
-	fast_cmd = SDEMU_MSG_SETPINS_DAT_OUT;
-	__R31 = (INT_ENABLE | (FAST_INT - INT_OFFSET));
-
-	/* Wait for msg to comlete */
-	while (fast_cmd != SDEMU_MSG_DONE) ;
-
-	in_send_mode = SEND_MODE;
-}
-
 static void enable_pins(void)
 {
 	/* Configure R30/R31 GPIOs to directly go to register values */
 	CT_CFG.GPCFG0 = 0x0000;
-
-	switch_to_recv();
 }
 
 static void print_int(const char *str, register int line_nr)
@@ -309,8 +275,21 @@ static void print_int(const char *str, register int line_nr)
 	pru_rpmsg_send(&transport, dst, src, b, 9 + slen + 1);
 }
 
+static void drain_rpmsg(void)
+{
+	/* Check bit 30 of register R31 to see if the ARM has kicked us */
+	if (__R31 & HOST_INT) {
+		uint16_t len;
+		uint16_t tmp_src, tmp_dst;
+
+		clear_arm_irq();
+		while (pru_rpmsg_receive(&transport, &tmp_src, &tmp_dst, buf, &len) == PRU_RPMSG_SUCCESS) ;
+	}
+}
+
 static void read_sector(void)
 {
+#if 0
 	uint8_t *buf = alloc_buf(17);
 	uint64_t addr = (uint64_t)sector * 512;
 
@@ -323,6 +302,42 @@ static void read_sector(void)
 
 	/* Wait for msg to comlete */
 	while (fast_cmd != SDEMU_MSG_DONE) ;
+#else
+	uint16_t len;
+	uint16_t tmp_src, tmp_dst;
+	uint8_t *p = (void*)&current_sector;
+
+	current_sector.cmd = SDEMU_MSG_READ_SECTOR;
+	current_sector.offset = ((uint64_t)sector) * 512;
+
+	drain_rpmsg();
+	pru_rpmsg_send(&transport, dst, src, &current_sector, 16);
+
+	/* Wait for and receive reply */
+	while (1) {
+		int r;
+
+		/* We can read max (512-16) bytes in one transaction, so we split the transfer in 2. */
+		r = pru_rpmsg_receive(&transport, &tmp_src, &tmp_dst, p, &len);
+		if (r == PRU_RPMSG_SUCCESS)
+			break;
+	}
+	clear_arm_irq();
+
+	if (len != (512-16)) {
+		print_int("Short 1st read: ", len);
+	}
+
+	p += len;
+
+	/* Second half of the transfer */
+	while (pru_rpmsg_receive(&transport, &tmp_src, &tmp_dst, p, &len) != PRU_RPMSG_SUCCESS) ;
+	clear_arm_irq();
+
+	if (len != (sizeof(current_sector) - (512-16))) {
+		print_int("Short 2nd read: ", len);
+	}
+#endif
 }
 
 static inline void send_4bit(register uint32_t b)
@@ -339,187 +354,12 @@ static inline void send_4bit(register uint32_t b)
 	while (!(__R31 & CLK_MASK)) ;
 }
 
-/* shift may go from 0 (1<<0) up to 7 (1<<7) */
-static inline void send_1bit(register uint32_t b, register uint32_t shift)
-{
-	/* Wait for a tick (clk is down) */
-	while (__R31 & CLK_MASK) ;
-
-	/* Set lines */
-	if (shift < 8)
-		__R30 = b << (8 - shift);
-	else
-		__R30 = b >> (shift - 8);
-
-	/* Wait until clk is up again (so the host can read the bit) */
-	while (!(__R31 & CLK_MASK)) ;
-}
-
-static inline void wait_for_clk_low(void)
-{
-	/* Wait for a tick (clk is down) */
-	while (__R31 & CLK_MASK) ;
-}
-
-static inline void wait_for_clk_high(void)
-{
-	/* Wait until clk is up again (so the host can read the bit) */
-	while (!(__R31 & CLK_MASK)) ;
-}
-
-static inline void set_line_1bit(uint32_t b, uint32_t shift)
-{
-	/* Set lines */
-	if (shift < 8)
-		__R30 = b << (8 - shift);
-	else
-		__R30 = b >> (shift - 8);
-}
-
-#if 0
-#pragma FUNC_CANNOT_INLINE(send_buf_1bit_startend)
-
-static void send_buf_1bit_startend(register uint8_t *buf, register uint32_t len)
-{
-	uint32_t curbyte, nextbyte;
-
-	nextbyte = *buf;
-
-	/* Start Bit */
-	wait_for_clk_low();
-	set_line_1bit(0, 0);
-	wait_for_clk_high();
-
-	do {
-		curbyte = nextbyte;
-
-		/* Bit 0 - use gap to inc ptr */
-		wait_for_clk_low();
-		set_line_1bit(curbyte, 0);
-		wait_for_clk_high();
-		buf++;
-		asm volatile("");
-
-		/* Bit 1 - use gap to load next byte */
-		wait_for_clk_low();
-		set_line_1bit(curbyte, 1);
-		wait_for_clk_high();
-		nextbyte = *buf;
-		asm volatile("");
-
-		/* Bit 2 - use gap to dec len */
-		wait_for_clk_low();
-		set_line_1bit(curbyte, 2);
-		wait_for_clk_high();
-		len--;
-		asm volatile("");
-
-		/* Bit 3 - nop in gap */
-		wait_for_clk_low();
-		set_line_1bit(curbyte, 3);
-		wait_for_clk_high();
-
-		/* Bit 4 - nop in gap */
-		wait_for_clk_low();
-		set_line_1bit(curbyte, 4);
-		wait_for_clk_high();
-
-		/* Bit 5 - nop in gap */
-		wait_for_clk_low();
-		set_line_1bit(curbyte, 5);
-		wait_for_clk_high();
-
-		/* Bit 6 - nop in gap */
-		wait_for_clk_low();
-		set_line_1bit(curbyte, 6);
-		wait_for_clk_high();
-
-		/* Bit 7 - loop in gap */
-		wait_for_clk_low();
-		set_line_1bit(curbyte, 7);
-		wait_for_clk_high();
-
-	} while(len);
-
-	/* End Bit */
-	wait_for_clk_low();
-	set_line_1bit(1, 0);
-	wait_for_clk_high();
-}
-#else
 extern void send_buf_1bit_startend(register uint8_t *buf, register uint32_t len);
-#endif
 
-static inline void send_8x1bit(register uint32_t byte)
-{
-	send_1bit(byte, 7);
-	send_1bit(byte, 6);
-	send_1bit(byte, 5);
-	send_1bit(byte, 4);
-	send_1bit(byte, 3);
-	send_1bit(byte, 2);
-	send_1bit(byte, 1);
-	send_1bit(byte, 0);
-}
-
-static inline void send_16x1bit(register uint32_t byte)
-{
-	send_1bit(byte, 15);
-	send_1bit(byte, 14);
-	send_1bit(byte, 13);
-	send_1bit(byte, 12);
-	send_1bit(byte, 11);
-	send_1bit(byte, 10);
-	send_1bit(byte, 9);
-	send_1bit(byte, 8);
-	send_1bit(byte, 7);
-	send_1bit(byte, 6);
-	send_1bit(byte, 5);
-	send_1bit(byte, 4);
-	send_1bit(byte, 3);
-	send_1bit(byte, 2);
-	send_1bit(byte, 1);
-	send_1bit(byte, 0);
-}
-
-static inline void send_32x1bit(register uint32_t byte)
-{
-	send_1bit(byte, 31);
-	send_1bit(byte, 30);
-	send_1bit(byte, 29);
-	send_1bit(byte, 28);
-	send_1bit(byte, 27);
-	send_1bit(byte, 26);
-	send_1bit(byte, 25);
-	send_1bit(byte, 24);
-	send_1bit(byte, 23);
-	send_1bit(byte, 22);
-	send_1bit(byte, 21);
-	send_1bit(byte, 20);
-	send_1bit(byte, 19);
-	send_1bit(byte, 18);
-	send_1bit(byte, 17);
-	send_1bit(byte, 16);
-	send_1bit(byte, 15);
-	send_1bit(byte, 14);
-	send_1bit(byte, 13);
-	send_1bit(byte, 12);
-	send_1bit(byte, 11);
-	send_1bit(byte, 10);
-	send_1bit(byte, 9);
-	send_1bit(byte, 8);
-	send_1bit(byte, 7);
-	send_1bit(byte, 6);
-	send_1bit(byte, 5);
-	send_1bit(byte, 4);
-	send_1bit(byte, 3);
-	send_1bit(byte, 2);
-	send_1bit(byte, 1);
-	send_1bit(byte, 0);
-}
 
 static void read_data_4bit(void)
 {
+#if 0
 	register uint8_t *b = data_buf;
 	register uint8_t *b_end = &data_buf[514];
 
@@ -561,61 +401,20 @@ static void read_data_4bit(void)
 
 	/* End Bit */
 	send_4bit(0xf);
+#endif
 }
 
 static void read_data_1bit(void)
 {
-	register uint32_t *b = (void*)data_buf;
-	register uint32_t *b_end;
-	register uint32_t crc16;
-	register uint32_t i;
-
 	print_int("Reading Sector: ", sector);
 
-	/* Emit data to the host */
-	if (0) {
-		read_sector();
-	} else {
-		for (i = 0; i < (512 / 4); i+=4) {
-			b[i] = 0xAAAAAAAA;
-			b[i+1] = 0x0;
-			b[i+2] = 0x1;
-			b[i+3] = 0xFFFFFFFF;
-		}
+	/* Read sector from host */
+	read_sector();
 
-		crc16 = crc16ccitt_xmodem(data_buf, 512);
-		data_buf[512] = crc16 >> 8;
-		data_buf[513] = crc16;
-	}
+	print_int("Sending Sector 1b: ", sector);
 
-	asm volatile (" nop \n");
-	asm volatile (" nop \n");
-	asm volatile (" nop \n");
-	asm volatile (" nop \n");
-
-	send_buf_1bit_startend(data_buf, 514);
-#if 0
-	b_end = (void*)&data_buf[512];
-
-	/* Start Bit */
-	send_1bit(0, 0);
-
-	/* Data */
-	for (i = 0; i < (512 / 4); i++)
-		send_32x1bit(b[i]);
-
-	/* CRC16 */
-	send_16x1bit(crc16);
-
-	/* End Bit */
-	send_1bit(1, 0);
-#endif
-
-
-	asm volatile (" nop \n");
-	asm volatile (" nop \n");
-	asm volatile (" nop \n");
-	asm volatile (" nop \n");
+	send_buf_1bit_startend(current_sector.data, 514);
+	sector++;
 }
 
 static void write_data_4bit(void)
@@ -668,6 +467,20 @@ static void send_scr_1bit(void)
 	print_int("Finished sending SCR  ", 0);
 }
 
+static void send_switch(void)
+{
+	register uint8_t *b = (void*)&switch_mode;
+
+	print_int("Reading switch[0]: ", *(uint32_t*)b);
+	print_int("Reading switch[1]: ", *(uint32_t*)(b+4));
+	print_int("Reading switch[2]: ", *(uint32_t*)(b+8));
+
+	/* Emit data to the host */
+	send_buf_1bit_startend(b, sizeof(switch_mode));
+
+	print_int("Finished sending switch_mode  ", 0);
+}
+
 /*
  * main.c
  */
@@ -685,6 +498,7 @@ void main(void)
 
 	/* Initialize internal state */
 	init_scr_crc16();
+	init_switch_mode_crc16();
 
 	/* Make sure the Linux drivers are ready for RPMsg communication */
 	status = &resourceTable.rpmsg_vdev.status;
@@ -721,52 +535,52 @@ void main(void)
 
 			switch (requested_mode) {
 			case pru1_mode_read_1bit:
-				print_int("Requested Read sector:", sector);
+				print_int("Requested Read sector 1b:", sector);
 
 				active_mode = pru1_mode_read_1bit;
 				read_data_1bit();
-				__R30 = DAT0_MASK | DAT1_MASK | DAT2_MASK | DAT3_MASK;
+				__R30 = DAT0_MASK | DAT1_MASK | DAT2_MASK | DAT3_MASK |
+						DAT0_OUT_MASK | DAT1_OUT_MASK | DAT2_OUT_MASK | DAT3_OUT_MASK;
 				break;
 			case pru1_mode_read_4bit:
-				print_int("Requested Read sector:", sector);
+				print_int("Requested Read sector 4b:", sector);
 
 				active_mode = pru1_mode_read_4bit;
 				read_data_4bit();
-				__R30 = DAT0_MASK | DAT1_MASK | DAT2_MASK | DAT3_MASK;
+				__R30 = DAT0_MASK | DAT1_MASK | DAT2_MASK | DAT3_MASK |
+						DAT0_OUT_MASK | DAT1_OUT_MASK | DAT2_OUT_MASK | DAT3_OUT_MASK;
 				break;
 			case pru1_mode_write_4bit:
 				active_mode = pru1_mode_write_4bit;
 				write_data_4bit();
 				break;
-			case pru1_mode_set_recv:
-				if (active_mode != pru1_mode_set_recv)
-					switch_to_recv();
-
-				active_mode = pru1_mode_set_recv;
-				break;
-			case pru1_mode_set_send:
-				if (active_mode != pru1_mode_set_send) {
-					__R30 = DAT0_MASK | DAT1_MASK | DAT2_MASK | DAT3_MASK;
-					switch_to_send();
-				}
-
-				active_mode = pru1_mode_set_send;
-				break;
 			case pru1_mode_read_scr_4bit:
 				if (active_mode != pru1_mode_read_scr_4bit)
 					send_scr_4bit();
 
-				__R30 = DAT0_MASK | DAT1_MASK | DAT2_MASK | DAT3_MASK;
+				__R30 = DAT0_MASK | DAT1_MASK | DAT2_MASK | DAT3_MASK |
+						DAT0_OUT_MASK | DAT1_OUT_MASK | DAT2_OUT_MASK | DAT3_OUT_MASK;
 				active_mode = pru1_mode_read_scr_4bit;
 				break;
 			case pru1_mode_read_scr_1bit:
 				if (active_mode != pru1_mode_read_scr_1bit)
 					send_scr_1bit();
 
-				__R30 = DAT0_MASK | DAT1_MASK | DAT2_MASK | DAT3_MASK;
+				__R30 = DAT0_MASK | DAT1_MASK | DAT2_MASK | DAT3_MASK |
+						DAT0_OUT_MASK | DAT1_OUT_MASK | DAT2_OUT_MASK | DAT3_OUT_MASK;
 				active_mode = pru1_mode_read_scr_1bit;
 				break;
+			case pru1_mode_send_switch:
+				if (active_mode != pru1_mode_send_switch)
+					send_switch();
+
+				__R30 = DAT0_MASK | DAT1_MASK | DAT2_MASK | DAT3_MASK |
+						DAT0_OUT_MASK | DAT1_OUT_MASK | DAT2_OUT_MASK | DAT3_OUT_MASK;
+				active_mode = pru1_mode_send_switch;
+				break;
 			case pru1_mode_idle:
+				__R30 = DAT0_MASK | DAT1_MASK | DAT2_MASK | DAT3_MASK |
+						DAT0_OUT_MASK | DAT1_OUT_MASK | DAT2_OUT_MASK | DAT3_OUT_MASK;
 				active_mode = pru1_mode_idle;
 				break;
 			}
