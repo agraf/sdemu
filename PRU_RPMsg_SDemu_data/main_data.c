@@ -41,6 +41,7 @@
 #include <stdio.h>
 #include <string.h>
 #include <pru_cfg.h>
+#include <pru_ctrl.h>
 #include <pru_intc.h>
 #include <rsc_types.h>
 #include <pru_rpmsg.h>
@@ -77,8 +78,6 @@ volatile register uint32_t __R31;	/* IN */
 #define TO_ARM_HOST			18
 #define FROM_ARM_HOST			19
 
-#define FAST_INT 0x1d
-
 #define INT_ENABLE (1 << 5)
 #define INT_OFFSET 16
 
@@ -98,7 +97,6 @@ volatile register uint32_t __R31;	/* IN */
 
 
 //#define PRU_DATA __far __attribute__((cregister("PRU_DMEM_DATA", near)))
-//#define PRU_FAST __far __attribute__((cregister("PRU_DMEM_FAST", near)))
 
 #pragma DATA_SECTION(requested_mode, ".pru1data");
 #pragma RETAIN(requested_mode)
@@ -111,22 +109,6 @@ volatile enum pru1_mode active_mode;
 #pragma DATA_SECTION(sector, ".pru1data");
 #pragma RETAIN(sector)
 volatile uint32_t sector;
-
-#pragma DATA_SECTION(fast_cmd, ".fast");
-#pragma RETAIN(fast_cmd)
-volatile char fast_cmd;
-
-#pragma DATA_SECTION(fast_arg1, ".fast");
-#pragma RETAIN(fast_arg1)
-volatile uint32_t fast_arg1;
-
-#pragma DATA_SECTION(fast_arg2, ".fast");
-#pragma RETAIN(fast_arg2)
-volatile uint64_t fast_arg2;
-
-#pragma DATA_SECTION(fast_arg3, ".fast");
-#pragma RETAIN(fast_arg3)
-volatile uint32_t fast_arg3;
 
 struct sdemu_msg_sector current_sector;
 
@@ -188,6 +170,57 @@ uint8_t switch_mode[64 + 2] = {
 		0x01,
 };
 
+/* SD Status Register */
+typedef struct sd_status {
+	uint8_t res1:6;
+	uint8_t dat_bus_width:2;
+
+	uint8_t res2;
+	uint8_t sd_card_type[2];
+	uint8_t size_of_protected_area[4];
+	uint8_t speed_class;
+	uint8_t performance_move;
+
+	uint8_t res3:4;
+	uint8_t au_size:4;
+
+	uint8_t erase_size_hi;
+	uint8_t erase_size_lo;
+
+	uint8_t erase_offset:2;
+	uint8_t erase_timeout:6;
+
+	uint8_t uhs_au_size:4;
+	uint8_t uhs_speed_grade:4;
+
+	uint8_t res4[49];
+
+	uint8_t crc16_hi;
+	uint8_t crc16_lo;
+} sd_status_t;
+
+sd_status_t sd_status_1bit = {
+		.dat_bus_width = 0, /* 1 bit */
+		.sd_card_type = { 0x00, 0x00 },
+		.speed_class = 0x04, /* Class 10 */
+		.performance_move = 0, /* Sequential Write */
+		.au_size = 1, /* 16 kb */
+		.erase_size_lo = 1, /* 1 AU */
+		.erase_timeout = 63, /* 63 sec */
+		.erase_offset = 3, /* 3 sec */
+};
+
+sd_status_t sd_status_4bit = {
+		.dat_bus_width = 2, /* 4 bit */
+		.sd_card_type = { 0x00, 0x00 },
+		.speed_class = 0x04, /* Class 10 */
+		.performance_move = 0, /* Sequential Write */
+		.au_size = 1, /* 16 kb */
+		.erase_size_lo = 1, /* 1 AU */
+		.erase_timeout = 63, /* 63 sec */
+		.erase_offset = 3, /* 3 sec */
+};
+
 static uint16_t crc16(uint8_t *message, int nBytes,
         uint16_t remainder, uint16_t polynomial)
 {
@@ -225,6 +258,21 @@ static void init_switch_mode_crc16(void)
 
 	switch_mode[64] = crc16 >> 8;
 	switch_mode[65] = crc16;
+}
+
+static void init_sd_status_crc16(void)
+{
+	uint16_t crc16;
+
+	crc16 = crc16ccitt_xmodem((void*)&sd_status_1bit, sizeof(sd_status_1bit));
+
+	sd_status_1bit.crc16_hi = crc16 >> 8;
+	sd_status_1bit.crc16_lo = crc16;
+
+	crc16 = crc16ccitt_xmodem((void*)&sd_status_4bit, sizeof(sd_status_4bit));
+
+	sd_status_4bit.crc16_hi = crc16 >> 8;
+	sd_status_4bit.crc16_lo = crc16;
 }
 
 static uint8_t *alloc_buf(int len)
@@ -289,20 +337,6 @@ static void drain_rpmsg(void)
 
 static void read_sector(void)
 {
-#if 0
-	uint8_t *buf = alloc_buf(17);
-	uint64_t addr = (uint64_t)sector * 512;
-
-	/* Send ARM host message */
-	fast_cmd = SDEMU_MSG_PREAD_4BIT;
-	fast_arg1 = (long)data_buf;
-	fast_arg2 = (long)addr;
-	fast_arg3 = 512;
-	__R31 = (INT_ENABLE | (FAST_INT - INT_OFFSET));
-
-	/* Wait for msg to comlete */
-	while (fast_cmd != SDEMU_MSG_DONE) ;
-#else
 	uint16_t len;
 	uint16_t tmp_src, tmp_dst;
 	uint8_t *p = (void*)&current_sector;
@@ -337,71 +371,22 @@ static void read_sector(void)
 	if (len != (sizeof(current_sector) - (512-16))) {
 		print_int("Short 2nd read: ", len);
 	}
-#endif
-}
-
-static inline void send_4bit(register uint32_t b)
-{
-	/* Write data bits */
-
-	/* Wait for a tick (clk is down) */
-	while (__R31 & CLK_MASK) ;
-
-	/* Set lines */
-	__R30 = b << 8;
-
-	/* Wait until clk is up again (so the host can read the bit) */
-	while (!(__R31 & CLK_MASK)) ;
 }
 
 extern void send_buf_1bit_startend(register uint8_t *buf, register uint32_t len);
-
+extern void send_buf_4bit_startend(register uint8_t *buf, register uint32_t len);
 
 static void read_data_4bit(void)
 {
-#if 0
-	register uint8_t *b = data_buf;
-	register uint8_t *b_end = &data_buf[514];
-
 	print_int("Reading Sector: ", sector);
 
-	/* Emit data to the host */
-	if (0) {
-		read_sector();
-	} else {
-		int i;
-		uint16_t crc16;
+	/* Read sector from host */
+	read_sector();
 
-		/* XXX Incorrect length! Needs to be 512 bytes */
-		for (i = 0; i < 512; i+=2) {
-			b[i] = 0x12;
-			b[i + 1] = 0x48;
-		}
+	print_int("Sending Sector 4b: ", sector);
 
-		crc16 = crc16ccitt_xmodem(b, 512);
-		b[512] = crc16 >> 8;
-		b[513] = crc16;
-	}
-
-	/*
-	 * Wait for clock to come up, so we that get a full
-	 * clock cycle for the next transmission
-	 */
-	while (!(__R31 & CLK_MASK)) ;
-
-	/* Start Bit */
-	send_4bit(0);
-
-	/* Data */
-	do {
-		send_4bit(*b >> 4);
-		send_4bit(*b);
-		b++;
-	} while(b != b_end);
-
-	/* End Bit */
-	send_4bit(0xf);
-#endif
+	send_buf_4bit_startend(current_sector.data, 514);
+	sector++;
 }
 
 static void read_data_1bit(void)
@@ -425,32 +410,13 @@ static void write_data_4bit(void)
 
 static void send_scr_4bit(void)
 {
-	register char *b = (void*)&scr;
-	register char *b_end = b + sizeof(scr);
+	register uint8_t *b = (void*)&scr;
 
 	print_int("Reading SCR[0]: ", *(uint32_t*)b);
 	print_int("Reading SCR[1]: ", *(uint32_t*)(b+4));
 
 	/* Emit data to the host */
-
-	/*
-	 * Wait for clock to come up, so we that get a full
-	 * clock cycle for the next transmission
-	 */
-	while (!(__R31 & CLK_MASK)) ;
-
-	/* Start Bit */
-	send_4bit(0);
-
-	/* Data */
-	do {
-		send_4bit(*b >> 4);
-		send_4bit(*b);
-		b++;
-	} while(b != b_end);
-
-	/* End - just in case */
-	send_4bit(0xf);
+	send_buf_4bit_startend(b, sizeof(scr));
 }
 
 static void send_scr_1bit(void)
@@ -481,6 +447,23 @@ static void send_switch(void)
 	print_int("Finished sending switch_mode  ", 0);
 }
 
+static void send_sd_status_4bit(void)
+{
+	register uint8_t *b = (void*)&sd_status_4bit;
+
+	/* Emit data to the host */
+	send_buf_4bit_startend(b, sizeof(sd_status_4bit));
+}
+
+static void send_sd_status_1bit(void)
+{
+	register uint8_t *b = (void*)&sd_status_1bit;
+
+	/* Emit data to the host */
+	send_buf_1bit_startend(b, sizeof(sd_status_1bit));
+}
+void return_to_dat_main(void);
+
 /*
  * main.c
  */
@@ -499,6 +482,7 @@ void main(void)
 	/* Initialize internal state */
 	init_scr_crc16();
 	init_switch_mode_crc16();
+	init_sd_status_crc16();
 
 	/* Make sure the Linux drivers are ready for RPMsg communication */
 	status = &resourceTable.rpmsg_vdev.status;
@@ -509,6 +493,14 @@ void main(void)
 
 	/* Create the RPMsg channel between the PRU and ARM user space using the transport structure. */
 	while (pru_rpmsg_channel(RPMSG_NS_CREATE, &transport, CHAN_NAME, CHAN_DESC, CHAN_PORT) != PRU_RPMSG_SUCCESS) ;
+
+	/* Set up return point for soft reset */
+	PRU1_CTRL.CTRL_bit.PCTR_RST_VAL = (uintptr_t)(void*)return_to_dat_main;
+
+	asm("  xout 10, &R0, 120");
+	asm("  .global return_to_dat_main");
+	asm("return_to_dat_main:");
+	asm("  xin 10, &R0, 120");
 
 	while (1) {
 		/* Check bit 31 of register R31 to see if the ARM has kicked us */
@@ -577,6 +569,22 @@ void main(void)
 				__R30 = DAT0_MASK | DAT1_MASK | DAT2_MASK | DAT3_MASK |
 						DAT0_OUT_MASK | DAT1_OUT_MASK | DAT2_OUT_MASK | DAT3_OUT_MASK;
 				active_mode = pru1_mode_send_switch;
+				break;
+			case pru1_mode_read_sd_status_4bit:
+				if (active_mode != pru1_mode_read_sd_status_4bit)
+					send_sd_status_4bit();
+
+				__R30 = DAT0_MASK | DAT1_MASK | DAT2_MASK | DAT3_MASK |
+						DAT0_OUT_MASK | DAT1_OUT_MASK | DAT2_OUT_MASK | DAT3_OUT_MASK;
+				active_mode = pru1_mode_read_sd_status_4bit;
+				break;
+			case pru1_mode_read_sd_status_1bit:
+				if (active_mode != pru1_mode_read_sd_status_1bit)
+					send_sd_status_1bit();
+
+				__R30 = DAT0_MASK | DAT1_MASK | DAT2_MASK | DAT3_MASK |
+						DAT0_OUT_MASK | DAT1_OUT_MASK | DAT2_OUT_MASK | DAT3_OUT_MASK;
+				active_mode = pru1_mode_read_sd_status_1bit;
 				break;
 			case pru1_mode_idle:
 				__R30 = DAT0_MASK | DAT1_MASK | DAT2_MASK | DAT3_MASK |

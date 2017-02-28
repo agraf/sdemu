@@ -234,3 +234,125 @@ send_next_byte_startend_25Mhz:
 	wait_for_clk_low
 
 	jmp r3.w2
+
+
+
+; -------------------- 4 bit mode --------------------
+
+
+
+	.global send_buf_4bit_startend
+send_buf_4bit_startend:
+
+	; Args:
+	;
+	; R14	ptr
+	; R15	len
+
+	; Copy ptr+1 (next ptr) to r0
+	ADD	R0, R14, 1
+
+	; R15 = ptr+1+len (end of stream)
+	ADD R15, R0, R15
+
+	; next_byte = *ptr
+	LDI r1, 0
+	LBBO &R1.b0, R14, 0, 1
+
+	; R0	ptr (increasing)
+	; R1	next byte
+	; R14	current byte
+	; R15	len (decreasing)
+
+	; Check if we're in 25Mhz mode
+	wait_for_clk_high
+	nop
+	nop
+	wait_for_clk_low
+	nop
+	nop
+	nop
+	nop
+	qbbs send_buf_4bit_startend_25Mhz, r31, 16
+
+	; Start bit
+	wait_for_clk_low
+	ldi r30.w0, 0
+	wait_for_clk_high
+
+send_next_byte_4bit:
+	; current_byte = next_byte
+	mov	r14, r1
+
+	; Bits [7..4] - use gap to load next byte
+	wait_for_clk_low
+	LSR R30.b0, R14, 4	; v1.1
+	LSR R30.b1, R14, 4	; v1.0
+	wait_for_clk_high
+	LBBO &R1.b0, R0, 0, 1
+
+	; Bits [3..0] - use gap to inc ptr
+	wait_for_clk_low
+	LSR R30.b0, R14, 0	; v1.1
+	LSR R30.b1, R14, 0	; v1.0
+	wait_for_clk_high
+	ADD R0, R0, 1
+	QBNE send_next_byte_4bit, R15, R0
+
+	; End bit
+	wait_for_clk_low
+	LDI R30.w0, 256
+	nop ; delay to ensure we don't get stale clock values
+	wait_for_clk_high
+
+	jmp r3.w2
+
+
+
+; The PRUs have some internal delay between input and output.
+; Measurements show that this delay is somewhere between 20 and
+; 40 ns.
+;
+; When running in 25Mhz mode, this means that by the time we see
+; the signal going down, it's already gone up and we should have
+; written a proper value to the line.
+;
+; The workaround set in place here simply set the next bit whenever
+; we see CLK going up rather than down. That way (in continuous
+; CLK environments) we give ourselves 20ns head start.
+
+send_buf_4bit_startend_25Mhz:
+	; Start bit
+	wait_for_clk_low
+	nop
+	nop
+	wait_for_clk_high
+	ldi r30.w0, 0
+	wait_for_clk_low
+
+send_next_byte_4bit_25Mhz:
+	; current_byte = next_byte
+	mov	r14, r1
+
+	; Bits [7..4] - use gap to load next byte
+	wait_for_clk_high
+	LSR R30.b0, R14, 4	; v1.1
+	LSR R30.b1, R14, 4	; v1.0
+	wait_for_clk_low
+	LBBO &R1.b0, R0, 0, 1
+
+	; Bits [3..0] - use gap to inc ptr, dec len
+	wait_for_clk_high
+	LSR R30.b0, R14, 0	; v1.1
+	LSR R30.b1, R14, 0	; v1.0
+	wait_for_clk_low
+	ADD R0, R0, 1
+	QBNE send_next_byte_4bit_25Mhz, R15, R0
+
+	; End bit
+	wait_for_clk_high
+	LDI R30.w0, 256
+	nop ; delay to ensure we don't get stale clock values
+	wait_for_clk_low
+
+	jmp r3.w2

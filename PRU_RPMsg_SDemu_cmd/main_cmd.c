@@ -41,6 +41,7 @@
 #include <stdio.h>
 #include <string.h>
 #include <pru_cfg.h>
+#include <pru_ctrl.h>
 #include <pru_intc.h>
 #include <rsc_types.h>
 #include <pru_rpmsg.h>
@@ -300,7 +301,7 @@ csd_v2_t csd = {
 		.taac = 0x0e,			/* 1ms */
 		.nsac = 0x00,			/* 0 clock cycles */
 		.tran_speed = 0x32,		/* 25Mhz */
-		.ccc_hi = 0x0,
+		.ccc_hi = 0x50,			/* Application Specific, Switch */
 		.ccc_lo = 0xf,			/* Class 0-3 */
 		.read_bl_len = 9,		/* 512 byte blocks */
 		.read_bl_partial = 0,
@@ -721,9 +722,15 @@ static void detect_hwversion(void)
 	}
 
 	/* enable_pins() enables DAT via buffer, disables CMD via buffer */
-	__R31 = CMD_OUT_OFF_MASK;
+	__R30 = CMD_OUT_OFF_MASK;
 
 	print_int("SDemu version: ", hwversion);
+}
+
+static void reset_dat_pru(void)
+{
+	/* The DAT PRU configures itself on init for soft-reset awareness, just kick it */
+	PRU1_CTRL.CTRL_bit.SOFT_RST_N = 0;
 }
 
 /*
@@ -903,7 +910,7 @@ static enum SDCardStates get_state(void)
 static void read_acmd(register uint32_t args)
 {
 	register unsigned char curcmd;
-	int should_send_scr;
+	int should_send;
 
 	/* Wait for CMD to go down and CLK to go up -> start bit */
 	while ((__R31 & (CMD_MASK | CLK_MASK)) != CLK_MASK) ;
@@ -915,23 +922,6 @@ static void read_acmd(register uint32_t args)
 	print_int("[ in] ACMD: ", curcmd);
 
 	switch (curcmd) {
-	case ACMD_SD_APP_OP_COND | CMD_FROM_HOST:		/* ACMD41 */
-		/*
-		 * Some firmware is supposed to break when we power on immediately,
-		 * better tell the host next time
-		 */
-		reply_r3();
-
-		ocr |= OCR_POWER_UP; /* Power on */
-		ocr |= OCR_CAPACITY; /* SDHC */
-		set_state(sd_ready_state);
-		break;
-	case ACMD_SET_CLR_CARD_DETECT | CMD_FROM_HOST:	/* ACMD42 */
-		/*
-		 * XXX Implement Card Detect resistor properly (needs host communication)
-		 */
-		reply_r1(curcmd);
-		break;
 	case ACMD_SET_BUS_WIDTH | CMD_FROM_HOST:		/* ACMD6 */
 		switch (args) {
 		case 0:
@@ -950,20 +940,57 @@ static void read_acmd(register uint32_t args)
 
 		reply_r1(curcmd);
 		break;
-	case ACMD_SEND_SCR | CMD_FROM_HOST:	/* ACMD51 */
+	case ACMD_SD_STATUS | CMD_FROM_HOST:			/* ACMD13 */
 		switch (get_state()) {
 		case sd_transfer_state:
-			should_send_scr = 1;
+			should_send = 1;
 			break;
 		default:
-			should_send_scr = 0;
+			should_send = 0;
 			card_status |= ILLEGAL_COMMAND;
 			break;
 		}
 
 		reply_r1(curcmd);
 
-		if (should_send_scr) {
+		if (should_send) {
+			if (bus_width == SD_BUS_1BIT)
+				requested_mode = pru1_mode_read_sd_status_1bit;
+			else
+				requested_mode = pru1_mode_read_sd_status_4bit;
+		}
+		break;
+	case ACMD_SD_APP_OP_COND | CMD_FROM_HOST:		/* ACMD41 */
+		/*
+		 * Some firmware is supposed to break when we power on immediately,
+		 * better tell the host next time
+		 */
+		reply_r3();
+
+		ocr |= OCR_POWER_UP; /* Power on */
+		ocr |= OCR_CAPACITY; /* SDHC */
+		set_state(sd_ready_state);
+		break;
+	case ACMD_SET_CLR_CARD_DETECT | CMD_FROM_HOST:	/* ACMD42 */
+		/*
+		 * XXX Implement Card Detect resistor properly (needs host communication)
+		 */
+		reply_r1(curcmd);
+		break;
+	case ACMD_SEND_SCR | CMD_FROM_HOST:	/* ACMD51 */
+		switch (get_state()) {
+		case sd_transfer_state:
+			should_send = 1;
+			break;
+		default:
+			should_send = 0;
+			card_status |= ILLEGAL_COMMAND;
+			break;
+		}
+
+		reply_r1(curcmd);
+
+		if (should_send) {
 			set_state(sd_sendingdata_state);
 
 			/* Force PRU1 back to idle */
@@ -976,6 +1003,9 @@ static void read_acmd(register uint32_t args)
 				requested_mode = pru1_mode_read_scr_1bit;
 			else
 				requested_mode = pru1_mode_read_scr_4bit;
+
+			/* Assume we've already finished sending ... */
+			set_state(sd_transfer_state);
 		}
 
 		break;
@@ -1013,6 +1043,7 @@ static void cmd_go_idle_state(register int curcmd, register int args)
 	set_state(sd_idle_state);
 	card_status &= ~CARD_STATUS_B;
 	requested_mode = pru1_mode_idle;
+	reset_dat_pru();
 
 	/* No reply */
 }
@@ -1060,6 +1091,9 @@ static void cmd_switch(register int curcmd, register int args)
 
 	switch_to_data_send();
 	requested_mode = pru1_mode_send_switch;
+
+	/* Assume we have already finished sending ... */
+	set_state(sd_transfer_state);
 }
 
 static void cmd_select_card(register int curcmd, register int args)
@@ -1172,6 +1206,8 @@ static void cmd_stop_transmission(register int curcmd, register int args)
 	}
 
 	requested_mode = pru1_mode_idle;
+	reset_dat_pru();
+	while (active_mode != pru1_mode_idle) ;
 
 	/* Send R1b response */
 	reply_r1(curcmd);
@@ -1226,8 +1262,10 @@ static void cmd_read_multiple_block(register int curcmd, register int args)
 		print_int("[reply cmd18] crc7: ",  crc7);
 	}
 
-	switch_to_data_recv();
-	sector = addr;
+	switch_to_data_send();
+
+	/* XXX We lose addr granularity here */
+	sector = addr >> 9;
 	if (bus_width == SD_BUS_1BIT)
 		requested_mode = pru1_mode_read_1bit;
 	else
@@ -1241,6 +1279,18 @@ static void cmd_read_multiple_block(register int curcmd, register int args)
 	*/
 
 	card_status &= ~CARD_STATUS_B;
+}
+
+static void cmd_read_single_block(register int curcmd, register int args)
+{
+	/* Same as multi-blk read */
+	cmd_read_multiple_block(curcmd, args);
+
+	/* But stops after first submitted sector */
+	requested_mode = pru1_mode_idle;
+
+	/* And mark us as finished sending */
+	set_state(sd_transfer_state);
 }
 
 static void cmd_app_cmd(register int curcmd, register int args)
@@ -1277,7 +1327,7 @@ void (*const cmd_table[0x40])(register int curcmd, register int args) = {
 		[14]						= cmd_invalid,				/* CMD14 */
 		[CMD_GO_INACTIVE_STATE]		= cmd_invalid,				/* CMD15 XXX */
 		[CMD_SET_BLOCKLEN]			= cmd_set_blocklen,			/* CMD16 */
-		[CMD_READ_SINGLE_BLOCK]		= cmd_invalid,				/* CMD17 XXX */
+		[CMD_READ_SINGLE_BLOCK]		= cmd_read_single_block,	/* CMD17 */
 		[CMD_READ_MULTIPLE_BLOCK]	= cmd_read_multiple_block,	/* CMD18 */
 		[19]						= cmd_invalid,				/* CMD19 */
 		[20]						= cmd_invalid,				/* CMD20 */

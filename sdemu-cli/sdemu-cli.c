@@ -10,6 +10,7 @@
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 #include <unistd.h>
 #include <sys/types.h>
 #include <sys/stat.h>
@@ -46,7 +47,7 @@ static uint16_t crc16ccitt_xmodem(uint8_t *message, int nBytes) {
     return crc16(message, nBytes, 0x0000, 0x1021);
 }
 
-static int read_sector(uint64_t offset, char *buf)
+static void read_sector(uint64_t offset, char *buf)
 {
     uint16_t crc16;
 
@@ -57,8 +58,8 @@ static int read_sector(uint64_t offset, char *buf)
         r = read(filefd, buf, 512);
 
         if (r != 512) {
-            printf("Error: short read: %d\n", r);
-            exit(1);
+            printf("Error: short read: %d (offset=%#llx)\n", r, (long long)offset);
+            memset(buf, 0x0, 512);
         }
     } else {
         int i;

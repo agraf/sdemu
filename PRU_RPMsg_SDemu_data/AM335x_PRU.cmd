@@ -25,7 +25,6 @@ MEMORY
 	PRU_DMEM_1_0	: org = 0x00002000 len = 0x00002000	CREGISTER=25 /* 8kB PRU Data RAM 1_0 */
 
 	PRU_DMEM_DATA	: org = 0x00001f00 len = 0x00000080	 /* Some data at top of AS */
-	PRU_DMEM_FAST	: org = 0x00001f80 len = 0x00000080	 /* Some data at top of AS */
 
 	  PAGE 2:
 	PRU_SHAREDMEM	: org = 0x00010000 len = 0x00003000 CREGISTER=28 /* 12kB Shared RAM */
@@ -90,6 +89,5 @@ SECTIONS {
 	.fardata	>  PRU_DMEM_0_1, PAGE 1
 
 	.resource_table > PRU_DMEM_0_1, PAGE 1
-	.fast		>  PRU_DMEM_FAST, PAGE 1
 	.pru1data	>  PRU_DMEM_DATA, PAGE 1
 }
