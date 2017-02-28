@@ -47,9 +47,32 @@ static uint16_t crc16ccitt_xmodem(uint8_t *message, int nBytes) {
     return crc16(message, nBytes, 0x0000, 0x1021);
 }
 
-static void read_sector(uint64_t offset, char *buf)
+static uint16_t crc16_one_datline(char *buf, int line)
 {
-    uint16_t crc16;
+    char datbuf[512 / 4] = { 0 };
+    int i;
+
+    for (i = 0; i < 512; i++) {
+        datbuf[i/4] <<= 2;
+        datbuf[i/4] |= (((buf[i] >> line) & 0x10)) ? 0x2 : 0x0;
+        datbuf[i/4] |= ((buf[i] >> line) & 0x1);
+    }
+
+    return crc16ccitt_xmodem(datbuf, sizeof(datbuf));
+}
+
+static void set_bit(char *buf, int idx, int is_one)
+{
+    unsigned char bit = 1 << (0x7 - (idx & 0x7));
+
+    if (is_one)
+        buf[idx / 8] |= bit;
+    else
+        buf[idx / 8] &= ~bit;
+}
+
+static void read_sector(uint64_t offset, char *buf, int is_4bit)
+{
 
     if (filefd) {
         int r;
@@ -72,9 +95,28 @@ static void read_sector(uint64_t offset, char *buf)
         }
     }
 
-    crc16 = crc16ccitt_xmodem(buf, 512);
-    buf[512] = crc16 >> 8;
-    buf[513] = crc16;
+    if (is_4bit) {
+        uint16_t crc16[4] = {
+            crc16_one_datline(buf, 0),
+            crc16_one_datline(buf, 1),
+            crc16_one_datline(buf, 2),
+            crc16_one_datline(buf, 3),
+        };
+        int i, j = 0;
+        char *crc16_buf = &buf[512];
+
+        for (i = 0; i < 16; i++) {
+            set_bit(crc16_buf, j++, crc16[3] & (1 << (15 - i)));
+            set_bit(crc16_buf, j++, crc16[2] & (1 << (15 - i)));
+            set_bit(crc16_buf, j++, crc16[1] & (1 << (15 - i)));
+            set_bit(crc16_buf, j++, crc16[0] & (1 << (15 - i)));
+        }
+    } else {
+        uint16_t crc16 = crc16ccitt_xmodem(buf, 512);
+
+        buf[512] = crc16 >> 8;
+        buf[513] = crc16;
+    }
 }
 
 enum sdemu_msg_cmd {
@@ -97,9 +139,11 @@ struct sdemu_msg_get_size {
 
 struct sdemu_msg_sector {
     uint8_t cmd;
-    uint8_t pad[7];
+    uint8_t is_4bit;
+    uint8_t pad[6];
     uint64_t offset;
-    uint8_t data[514];
+    /* 512 bytes of data, crc16 for each dat line */
+    uint8_t data[512 + (2 * 4)];
 } __attribute__((packed));
 
 union sdemu_msg {
@@ -122,7 +166,6 @@ static int handle_fd(int fd)
             .cmd = SDEMU_MSG_GET_SIZE,
             .size = filesize,
         };
-printf("XXX [%4s] %s:%d\n", prustr, __func__, __LINE__);
         write(fd, &sz, sizeof(sz));
         break;
     }
@@ -132,12 +175,10 @@ printf("XXX [%4s] %s:%d\n", prustr, __func__, __LINE__);
             .cmd = SDEMU_MSG_READ_SECTOR,
             .offset = msg.sector.offset,
         };
-        read_sector(msg.sector.offset, sec.data);
-printf("XXX [%4s] %s:%d\n", prustr, __func__, __LINE__);
+        read_sector(msg.sector.offset, sec.data, msg.sector.is_4bit);
         /* We have a transmit limit of (512-16) bytes. Split the transfer in 2 */
         write(fd, &sec, 512-16);
         write(fd, ((void*)&sec) + (512-16), sizeof(sec) - (512-16));
-printf("XXX [%4s] %s:%d\n", prustr, __func__, __LINE__);
         break;
     }
     case SDEMU_MSG_DBG:

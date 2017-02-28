@@ -927,11 +927,9 @@ static void read_acmd(register uint32_t args)
 		case 0:
 			bus_width = SD_BUS_1BIT;
 			break;
-#if 0
 		case 2:
 			bus_width = SD_BUS_4BIT;
 			break;
-#endif
 		default:
 			print_int("[set bus width] Illegal bus width: ", args);
 			card_status |= ILLEGAL_COMMAND;
@@ -1044,6 +1042,9 @@ static void cmd_go_idle_state(register int curcmd, register int args)
 	card_status &= ~CARD_STATUS_B;
 	requested_mode = pru1_mode_idle;
 	reset_dat_pru();
+
+	/* Reset the system while at it */
+	bus_width = SD_BUS_1BIT;
 
 	/* No reply */
 }

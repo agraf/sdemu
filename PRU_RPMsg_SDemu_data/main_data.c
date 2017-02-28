@@ -150,7 +150,7 @@ scr_t scr = {
 		.sd_spec = 0x2,				/* Version 2.00 (SDHC) */
 		.data_stat_after_erase = 0x1,
 		.sd_security = 0x3,			/* SDHC */
-		.sd_bus_widths = SD_BUS_1BIT, /* Single DAT line only for now */
+		.sd_bus_widths = SD_BUS_1BIT | SD_BUS_4BIT,
 };
 
 uint8_t switch_mode[64 + 2] = {
@@ -335,13 +335,14 @@ static void drain_rpmsg(void)
 	}
 }
 
-static void read_sector(void)
+static void read_sector(int bitsize)
 {
 	uint16_t len;
 	uint16_t tmp_src, tmp_dst;
 	uint8_t *p = (void*)&current_sector;
 
 	current_sector.cmd = SDEMU_MSG_READ_SECTOR;
+	current_sector.is_4bit = bitsize == SD_BUS_4BIT ? 1 : 0;
 	current_sector.offset = ((uint64_t)sector) * 512;
 
 	drain_rpmsg();
@@ -381,11 +382,11 @@ static void read_data_4bit(void)
 	print_int("Reading Sector: ", sector);
 
 	/* Read sector from host */
-	read_sector();
+	read_sector(SD_BUS_4BIT);
 
 	print_int("Sending Sector 4b: ", sector);
 
-	send_buf_4bit_startend(current_sector.data, 514);
+	send_buf_4bit_startend(current_sector.data, 512 + (2 * 4));
 	sector++;
 }
 
@@ -394,11 +395,11 @@ static void read_data_1bit(void)
 	print_int("Reading Sector: ", sector);
 
 	/* Read sector from host */
-	read_sector();
+	read_sector(SD_BUS_1BIT);
 
 	print_int("Sending Sector 1b: ", sector);
 
-	send_buf_1bit_startend(current_sector.data, 514);
+	send_buf_1bit_startend(current_sector.data, 512 + 2);
 	sector++;
 }
 
