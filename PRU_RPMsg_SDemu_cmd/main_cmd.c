@@ -1007,6 +1007,10 @@ static void read_acmd(register uint32_t args)
 		}
 
 		break;
+	case CMD_APP_CMD | CMD_FROM_HOST: /* CMD55 again */
+		reply_r1(curcmd);
+		/* Keep APP_CMD bit set */
+		return;
 	default:
 		card_status |= ILLEGAL_COMMAND;
 		reply_r1(curcmd);
@@ -1091,7 +1095,10 @@ static void cmd_switch(register int curcmd, register int args)
 	/* XXX Update switch data */
 
 	switch_to_data_send();
-	requested_mode = pru1_mode_send_switch;
+	if (bus_width == SD_BUS_1BIT)
+		requested_mode = pru1_mode_send_switch_1bit;
+	else
+		requested_mode = pru1_mode_send_switch_4bit;
 
 	/* Assume we have already finished sending ... */
 	set_state(sd_transfer_state);
@@ -1312,7 +1319,7 @@ static void cmd_app_cmd(register int curcmd, register int args)
 
 void (*const cmd_table[0x40])(register int curcmd, register int args) = {
 		[CMD_GO_IDLE_STATE]			= cmd_go_idle_state,		/* CMD0 */
-		[CMD_SEND_OP_CMD]			= cmd_invalid,				/* CMD1 XXX */
+		[CMD_SEND_OP_CMD]			= cmd_invalid,				/* CMD1 XXX SPI only */
 		[CMD_ALL_SEND_CID]			= cmd_send_cid,				/* CMD2 */
 		[CMD_SEND_RELATIVE_ADDR]	= cmd_send_relative_addr,	/* CMD3 */
 		[CMD_SEND_DSR]				= cmd_invalid,				/* CMD4 XXX */

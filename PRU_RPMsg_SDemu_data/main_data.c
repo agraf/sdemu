@@ -434,7 +434,7 @@ static void send_scr_1bit(void)
 	print_int("Finished sending SCR  ", 0);
 }
 
-static void send_switch(void)
+static void send_switch(int bus_width)
 {
 	register uint8_t *b = (void*)&switch_mode;
 
@@ -443,7 +443,10 @@ static void send_switch(void)
 	print_int("Reading switch[2]: ", *(uint32_t*)(b+8));
 
 	/* Emit data to the host */
-	send_buf_1bit_startend(b, sizeof(switch_mode));
+	if (bus_width == SD_BUS_4BIT)
+		send_buf_4bit_startend(b, sizeof(switch_mode));
+	else
+		send_buf_1bit_startend(b, sizeof(switch_mode));
 
 	print_int("Finished sending switch_mode  ", 0);
 }
@@ -563,13 +566,21 @@ void main(void)
 						DAT0_OUT_MASK | DAT1_OUT_MASK | DAT2_OUT_MASK | DAT3_OUT_MASK;
 				active_mode = pru1_mode_read_scr_1bit;
 				break;
-			case pru1_mode_send_switch:
-				if (active_mode != pru1_mode_send_switch)
-					send_switch();
+			case pru1_mode_send_switch_1bit:
+				if (active_mode != pru1_mode_send_switch_1bit)
+					send_switch(SD_BUS_1BIT);
 
 				__R30 = DAT0_MASK | DAT1_MASK | DAT2_MASK | DAT3_MASK |
 						DAT0_OUT_MASK | DAT1_OUT_MASK | DAT2_OUT_MASK | DAT3_OUT_MASK;
-				active_mode = pru1_mode_send_switch;
+				active_mode = pru1_mode_send_switch_1bit;
+				break;
+			case pru1_mode_send_switch_4bit:
+				if (active_mode != pru1_mode_send_switch_4bit)
+					send_switch(SD_BUS_4BIT);
+
+				__R30 = DAT0_MASK | DAT1_MASK | DAT2_MASK | DAT3_MASK |
+						DAT0_OUT_MASK | DAT1_OUT_MASK | DAT2_OUT_MASK | DAT3_OUT_MASK;
+				active_mode = pru1_mode_send_switch_4bit;
 				break;
 			case pru1_mode_read_sd_status_4bit:
 				if (active_mode != pru1_mode_read_sd_status_4bit)
