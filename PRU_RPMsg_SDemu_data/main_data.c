@@ -150,7 +150,7 @@ scr_t scr = {
 		.sd_spec = 0x2,				/* Version 2.00 (SDHC) */
 		.data_stat_after_erase = 0x1,
 		.sd_security = 0x3,			/* SDHC */
-		.sd_bus_widths = SD_BUS_1BIT | SD_BUS_4BIT,
+		.sd_bus_widths = SD_BUS_1BIT /* | SD_BUS_4BIT XXX need to adapt crc16 calculations... */,
 };
 
 uint8_t switch_mode[64 + 2] = {
@@ -220,6 +220,14 @@ sd_status_t sd_status_4bit = {
 		.erase_timeout = 63, /* 63 sec */
 		.erase_offset = 3, /* 3 sec */
 };
+
+struct num_written_blocks {
+	uint8_t num[4];
+	uint8_t crc16_hi;
+	uint8_t crc16_lo;
+};
+
+uint32_t num_written_blocks = 0;
 
 static uint16_t crc16(uint8_t *message, int nBytes,
         uint16_t remainder, uint16_t polynomial)
@@ -381,7 +389,7 @@ static void read_data_4bit(void)
 {
 	print_int("Reading Sector: ", sector);
 
-	/* Read sector from host */
+	/* Read sector from card */
 	read_sector(SD_BUS_4BIT);
 
 	print_int("Sending Sector 4b: ", sector);
@@ -394,7 +402,7 @@ static void read_data_1bit(void)
 {
 	print_int("Reading Sector: ", sector);
 
-	/* Read sector from host */
+	/* Read sector from card */
 	read_sector(SD_BUS_1BIT);
 
 	print_int("Sending Sector 1b: ", sector);
@@ -403,10 +411,31 @@ static void read_data_1bit(void)
 	sector++;
 }
 
-static void write_data_4bit(void)
-{
-	/* Receive data from the host */
+extern void read_buf_1bit_startend(register uint8_t *buf, register uint32_t len);
+extern void read_buf_4bit_startend(register uint8_t *buf, register uint32_t len);
 
+static void write_data(int buswidth)
+{
+	/* Write data to the card */
+
+	if (buswidth == SD_BUS_4BIT)
+		read_buf_4bit_startend(current_sector.data, 512 + (2 * 4));
+	else
+		read_buf_1bit_startend(current_sector.data, 512 + 2);
+
+	current_sector.cmd = SDEMU_MSG_WRITE_SECTOR;
+	current_sector.is_4bit = ((buswidth == SD_BUS_4BIT) ? 1 : 0);
+	current_sector.offset = ((uint64_t)sector) * 512;
+
+	drain_rpmsg();
+	/* Split the message in 2 chunks */
+	pru_rpmsg_send(&transport, dst, src, &current_sector, (512-16));
+	pru_rpmsg_send(&transport, dst, src, ((void*)&current_sector) + (512-16),
+				   sizeof(current_sector) - (512-16));
+
+	/* XXX reset? check if write was successful? */
+	num_written_blocks++;
+	sector++;
 }
 
 static void send_scr_4bit(void)
@@ -466,6 +495,27 @@ static void send_sd_status_1bit(void)
 	/* Emit data to the host */
 	send_buf_1bit_startend(b, sizeof(sd_status_1bit));
 }
+
+static void send_num_wr_blocks(int buswidth)
+{
+	uint16_t crc16;
+	struct num_written_blocks nwb;
+
+	nwb.num[0] = num_written_blocks >> 24;
+	nwb.num[1] = num_written_blocks >> 16;
+	nwb.num[2] = num_written_blocks >> 8;
+	nwb.num[3] = num_written_blocks >> 0;
+	crc16 = crc16ccitt_xmodem((void*)&nwb, sizeof(nwb.num));
+
+	nwb.crc16_hi = crc16 >> 8;
+	nwb.crc16_lo = crc16;
+
+	if (buswidth == SD_BUS_4BIT)
+		send_buf_4bit_startend(&nwb, sizeof(nwb));
+	else
+		send_buf_1bit_startend(&nwb, sizeof(nwb));
+}
+
 void return_to_dat_main(void);
 
 /*
@@ -546,9 +596,13 @@ void main(void)
 				__R30 = DAT0_MASK | DAT1_MASK | DAT2_MASK | DAT3_MASK |
 						DAT0_OUT_MASK | DAT1_OUT_MASK | DAT2_OUT_MASK | DAT3_OUT_MASK;
 				break;
+			case pru1_mode_write_1bit:
+				active_mode = pru1_mode_write_1bit;
+				write_data(SD_BUS_1BIT);
+				break;
 			case pru1_mode_write_4bit:
 				active_mode = pru1_mode_write_4bit;
-				write_data_4bit();
+				write_data(SD_BUS_4BIT);
 				break;
 			case pru1_mode_read_scr_4bit:
 				if (active_mode != pru1_mode_read_scr_4bit)
@@ -597,6 +651,22 @@ void main(void)
 				__R30 = DAT0_MASK | DAT1_MASK | DAT2_MASK | DAT3_MASK |
 						DAT0_OUT_MASK | DAT1_OUT_MASK | DAT2_OUT_MASK | DAT3_OUT_MASK;
 				active_mode = pru1_mode_read_sd_status_1bit;
+				break;
+			case pru1_mode_read_num_wr_blocks_1bit:
+				if (active_mode != pru1_mode_read_num_wr_blocks_1bit)
+					send_num_wr_blocks(SD_BUS_1BIT);
+
+				__R30 = DAT0_MASK | DAT1_MASK | DAT2_MASK | DAT3_MASK |
+						DAT0_OUT_MASK | DAT1_OUT_MASK | DAT2_OUT_MASK | DAT3_OUT_MASK;
+				active_mode = pru1_mode_read_num_wr_blocks_1bit;
+				break;
+			case pru1_mode_read_num_wr_blocks_4bit:
+				if (active_mode != pru1_mode_read_num_wr_blocks_4bit)
+					send_num_wr_blocks(SD_BUS_4BIT);
+
+				__R30 = DAT0_MASK | DAT1_MASK | DAT2_MASK | DAT3_MASK |
+						DAT0_OUT_MASK | DAT1_OUT_MASK | DAT2_OUT_MASK | DAT3_OUT_MASK;
+				active_mode = pru1_mode_read_num_wr_blocks_4bit;
 				break;
 			case pru1_mode_idle:
 				__R30 = DAT0_MASK | DAT1_MASK | DAT2_MASK | DAT3_MASK |

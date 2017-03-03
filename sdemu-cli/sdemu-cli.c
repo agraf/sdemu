@@ -152,6 +152,16 @@ union sdemu_msg {
     struct sdemu_msg_dbg dbg;
 };
 
+static void write_sector(struct sdemu_msg_sector *sec)
+{
+    int i;
+    printf("Write sector %#lx\n", sec->offset);
+    printf("Data: ");
+    for (i = 0; i < sizeof(sec->data); i++)
+        printf("%02x", sec->data[i]);
+    printf("\n");
+}
+
 static int handle_fd(int fd)
 {
     const char *prustr = (fd == fd_list[0]) ? "cmd" : "data";
@@ -181,6 +191,10 @@ static int handle_fd(int fd)
         write(fd, ((void*)&sec) + (512-16), sizeof(sec) - (512-16));
         break;
     }
+    case SDEMU_MSG_WRITE_SECTOR:
+        read(fd, ((void*)&msg) + (512-16), sizeof(struct sdemu_msg_sector) - (512-16));
+        write_sector(&msg.sector);
+        break;
     case SDEMU_MSG_DBG:
         printf("[%4s] %s", prustr, msg.dbg.data);
         break;

@@ -70,6 +70,14 @@ send_buf_cmd:
 	; R14	current byte
 	; R15	len (decreasing)
 
+	; Wait at least 3 clock cycles until we reply
+	loop finished_waiting, 3
+	wait_for_clk_high
+	nop
+	wait_for_clk_low
+	nop
+finished_waiting:
+
 	; Check if we're in 25Mhz mode
 	wait_for_clk_high
 	nop
@@ -119,6 +127,9 @@ send_next_byte:
 	; Bit 0 - loop in gap
 	send_bit_n 0
 	QBNE send_next_byte, R15, 0
+
+	; Make sure we set the line high again
+	ldi r30.b0, (1<<1) | (1<<7) ; Set CMD for v1.0 and v1.1
 
 	jmp r3.w2
 
@@ -177,5 +188,8 @@ send_next_byte_25Mhz:
 	; Bit 0 - loop in gap
 	send_bit_rev_n 0
 	QBNE send_next_byte_25Mhz, R15, 0
+
+	; Make sure we set the line high again
+	ldi r30.b0, (1<<1) | (1<<7) ; Set CMD for v1.0 and v1.1
 
 	jmp r3.w2
