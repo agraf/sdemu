@@ -222,6 +222,7 @@ int main(int argc, char **argv)
 {
     int nfds = 0;
     int i;
+    char *tmpbuf;
 
     if (argc > 1) {
         filefd = open(argv[1], O_RDWR);
@@ -235,6 +236,12 @@ int main(int argc, char **argv)
     } else {
         printf("No file name passed in, using test pattern for reads\n");
     }
+
+    /* Preload the first 2 sectors */
+    tmpbuf = malloc(512 + 2);
+    read_sector(0, tmpbuf, 0);
+    read_sector(1, tmpbuf, 0);
+    free(tmpbuf);
 
     for (i = 0; i < FD_TYPE_MAX; i++) {
         char path[512];

@@ -431,7 +431,7 @@ struct pru_rpmsg_transport transport;
 uint16_t src, dst;
 
 extern void send_buf_cmd(register uint8_t *buf, register uint32_t len);
-extern void read_buf_cmd(uint8_t *buf, uint32_t len);
+extern void read_buf_cmd(uint8_t *buf);
 
 static char *alloc_buf(int len)
 {
@@ -1454,19 +1454,6 @@ void (*const cmd_table[0x40])(register int curcmd, register int args) = {
 		[63]						= cmd_invalid,				/* CMD63 */
 };
 
-static uint32_t read_be32(void *ptr)
-{
-	uint8_t *p = ptr;
-	uint32_t r;
-
-	r = (((uint32_t)p[0]) << 24) |
-		(((uint32_t)p[1]) << 16) |
-		(((uint32_t)p[2]) << 8) |
-		(((uint32_t)p[3]) << 0);
-
-    return r;
-}
-
 static void read_cmd(void)
 {
 	uint8_t buf[6];
@@ -1474,13 +1461,21 @@ static void read_cmd(void)
 	uint32_t args;
 
 	/* Read command in reverse order (for LE) */
-	read_buf_cmd(buf, sizeof(buf));
+	read_buf_cmd(buf);
 	cmd = buf[5];
 	args = *(uint32_t*)(&buf[1]);
+
+	/*
+	print_int("[in] CMD: ", cmd);
+	print_int("[in] ARGS: ", args);
+	print_int("[in] CRC7: ", buf[0]);
+	*/
 
 	/* Only interpret host commands */
 	if ((cmd & 0xc0) != 0x40) {
 		print_int("[ illegal in] CMD: ", cmd);
+		print_int("[ illegal in] ARGS: ", args);
+		print_int("[ illegal in] CRC7: ", buf[0]);
 		return;
 	}
 

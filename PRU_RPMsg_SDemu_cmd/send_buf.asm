@@ -48,7 +48,7 @@ $1: ; Bit is clear
 		ldi r30.b0, 0x0
 		jmp $2
 $2:
-		wait_for_clk_low
+		;wait_for_clk_low	-- We are so fast that we dont need to wait for clk to come down
 	.endm
 	.global send_buf_cmd
 send_buf_cmd:
@@ -110,19 +110,15 @@ send_next_byte:
 
 	; Bit 4 - nop in gap
 	send_bit_n 4
-	nop ; delay to ensure we don't get stale clock values
 
 	; Bit 3 - nop in gap
 	send_bit_n 3
-	nop ; delay to ensure we don't get stale clock values
 
 	; Bit 2 - nop in gap
 	send_bit_n 2
-	nop ; delay to ensure we don't get stale clock values
 
 	; Bit 1 - nop in gap
 	send_bit_n 1
-	nop ; delay to ensure we don't get stale clock values
 
 	; Bit 0 - loop in gap
 	send_bit_n 0
@@ -160,6 +156,8 @@ send_next_byte_25Mhz:
 	; Bit 7 - use gap to inc ptr
 	send_bit_rev_n 7
 	ADD R0, R0, 1
+	nop ; wait for clock to go low
+	nop ; wait for clock to go low
 
 	; Bit 6 - use gap to load next byte
 	send_bit_rev_n 6
@@ -168,25 +166,36 @@ send_next_byte_25Mhz:
 	; Bit 5 - use gap to dec len
 	send_bit_rev_n 5
 	SUB R15, R15, 1
+	nop ; wait for clock to go low
+	nop ; wait for clock to go low
 
 	; Bit 4 - nop in gap
 	send_bit_rev_n 4
-	nop ; delay to ensure we don't get stale clock values
+	nop ; wait for clock to go low
+	nop ; wait for clock to go low
+	nop ; wait for clock to go low
 
 	; Bit 3 - nop in gap
 	send_bit_rev_n 3
-	nop ; delay to ensure we don't get stale clock values
+	nop ; wait for clock to go low
+	nop ; wait for clock to go low
+	nop ; wait for clock to go low
 
 	; Bit 2 - nop in gap
 	send_bit_rev_n 2
-	nop ; delay to ensure we don't get stale clock values
+	nop ; wait for clock to go low
+	nop ; wait for clock to go low
+	nop ; wait for clock to go low
 
 	; Bit 1 - nop in gap
 	send_bit_rev_n 1
-	nop ; delay to ensure we don't get stale clock values
+	nop ; wait for clock to go low
+	nop ; wait for clock to go low
+	nop ; wait for clock to go low
 
 	; Bit 0 - loop in gap
 	send_bit_rev_n 0
+	nop ; wait for clock to go low
 	QBNE send_next_byte_25Mhz, R15, 0
 
 	; Make sure we set the line high again
